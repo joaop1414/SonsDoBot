@@ -784,7 +784,21 @@ def enviar_mensagem(mensagem):
 
                 campo.send_keys(Keys.BACKSPACE)
 
-            campo.send_keys(mensagem)
+            # Insere o texto diretamente pelo protocolo CDP do Chromium.
+            # Isso evita simular uma tecla para cada caractere e mantém
+            # os eventos de entrada que o editor do YouTube precisa receber.
+            try:
+                driver.execute_cdp_cmd(
+                    "Input.insertText",
+                    {"text": mensagem}
+                )
+            except Exception as erro_cdp:
+                print(
+                    "[ENVIO] Inserção rápida falhou; "
+                    "usando digitação tradicional:",
+                    erro_cdp
+                )
+                campo.send_keys(mensagem)
 
             botao = driver.find_element(
                 By.CSS_SELECTOR,
