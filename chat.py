@@ -1,0 +1,1591 @@
+
+import os
+import time
+import queue
+import threading
+import requests
+import pytchat
+import shutil
+import itertools
+
+from flask import Flask, jsonify, Response
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.keys import Keys
+from selenium.common.exceptions import TimeoutException
+
+
+# ============================================================
+# CONFIGURAÇÕES
+# ============================================================
+
+CANAL = "jp1414"
+LIVE_ID = "GKChJD_lyE4"
+
+FIREBASE_URL = (
+    "https://botdo-6db23-default-rtdb.firebaseio.com/"
+)
+
+PERFIL = os.path.expanduser(
+    "~/youtube-client/perfis/conta1"
+)
+
+CHROMIUM = (
+    "/data/data/com.termux/files/usr/bin/chromium-browser"
+)
+
+CHROMEDRIVER = (
+    "/data/data/com.termux/files/usr/bin/chromedriver"
+)
+
+VERSAO = "156.0.8078.79"
+
+USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/156.0.0.0 Safari/537.36"
+)
+
+RECOMPENSA = 1
+INTERVALO_RECOMPENSA = 60
+
+INTERVALO_COMANDO = 5
+INTERVALO_SOM = 5
+
+# GitHub
+GITHUB_API = (
+    "https://api.github.com/repos/"
+    "joaop1414/SonsDoBot/contents"
+)
+
+INTERVALO_CACHE_SONS = 300
+
+EXTENSOES_AUDIO = (
+    ".mp3",
+    ".wav",
+    ".ogg",
+    ".m4a",
+    ".aac",
+    ".webm"
+)
+
+# Flask / OBS
+FLASK_HOST = "0.0.0.0"
+FLASK_PORTA = 5000
+
+SELETOR_CAMPO = (
+    "yt-live-chat-text-input-field-renderer"
+    "#input div#input[contenteditable]"
+)
+
+# Tempos de espera
+TIMEOUT_FIREBASE = 5
+TIMEOUT_ENVIO = 3
+
+rodando = True
+driver = None
+
+sessao = requests.Session()
+
+fila_mensagens = queue.Queue()
+fila_sons = queue.Queue()
+fila_eventos_chat = queue.Queue()
+
+jogadores = {}
+
+ultimo_comando = {}
+ultimo_som = {}
+
+lock_jogadores = threading.Lock()
+lock_envio = threading.Lock()
+lock_catalogo = threading.Lock()
+lock_cooldown = threading.Lock()
+
+contador_sons = itertools.count(1)
+
+catalogo_cache = {
+    "sons": {},
+    "atualizado": 0
+}
+
+
+# ============================================================
+# FIREBASE
+# ============================================================
+
+def firebase_url(channel_id):
+
+    return (
+        FIREBASE_URL
+        + "jogadores/"
+        + channel_id
+        + ".json"
+    )
+
+
+def firebase_buscar_jogador(channel_id):
+
+    try:
+
+        resposta = sessao.get(
+            firebase_url(channel_id),
+            timeout=TIMEOUT_FIREBASE
+        )
+
+        resposta.raise_for_status()
+
+        dados = resposta.json()
+
+        # Um jogador inexistente retorna null no Firebase.
+        # Nesse caso, consideramos um registro vazio.
+        if dados is None:
+            return {}
+
+        if not isinstance(dados, dict):
+            return {}
+
+        return dados
+
+    except Exception as erro:
+
+        print("[FIREBASE] Erro ao buscar jogador:", erro)
+
+        # None significa que a consulta falhou.
+        return None
+
+
+def firebase_atualizar_jogador(channel_id, dados):
+
+    try:
+
+        resposta = sessao.patch(
+            firebase_url(channel_id),
+            json=dados,
+            timeout=TIMEOUT_FIREBASE
+        )
+
+        resposta.raise_for_status()
+
+        return True
+
+    except Exception as erro:
+
+        print("[FIREBASE] Erro ao atualizar jogador:", erro)
+
+        return False
+
+
+# ============================================================
+# JOGADORES E MOEDAS
+# ============================================================
+
+def obter_jogador(channel_id, nome):
+
+    with lock_jogadores:
+
+        if channel_id in jogadores:
+
+            jogador = jogadores[channel_id]
+            jogador["nome"] = nome
+
+            return jogador
+
+    # Consulta o Firebase quando o jogador ainda não está
+    # carregado na memória.
+    dados = firebase_buscar_jogador(channel_id)
+
+    if dados is None:
+        return None
+
+    try:
+        moedas = int(dados.get("moedas", 0))
+    except (ValueError, TypeError):
+        moedas = 0
+
+    try:
+        ultima_mensagem = int(
+            dados.get("ultima_mensagem", 0)
+        )
+    except (ValueError, TypeError):
+        ultima_mensagem = 0
+
+    jogador = {
+        "nome": nome,
+        "channelId": channel_id,
+        "moedas": moedas,
+        "ultima_mensagem": ultima_mensagem
+    }
+
+    with lock_jogadores:
+
+        if channel_id in jogadores:
+            return jogadores[channel_id]
+
+        jogadores[channel_id] = jogador
+
+    return jogador
+
+
+def processar_jogador(channel_id, nome):
+
+    if not channel_id:
+        return
+
+    jogador = obter_jogador(channel_id, nome)
+
+    if jogador is None:
+        return
+
+    agora = int(time.time())
+
+    # Primeiro verificamos a memória para evitar consultas
+    # desnecessárias ao Firebase em todas as mensagens.
+    with lock_jogadores:
+
+        ultimo_pagamento = jogador["ultima_mensagem"]
+
+        if agora - ultimo_pagamento < INTERVALO_RECOMPENSA:
+            return
+
+        # A partir daqui existe a possibilidade de alterar
+        # o saldo. Portanto, consultamos o Firebase novamente.
+        dados = firebase_buscar_jogador(channel_id)
+
+        if dados is None:
+            print(
+                "[MOEDAS] Recompensa cancelada: "
+                "não foi possível consultar o Firebase."
+            )
+            return
+
+        try:
+            saldo_atual = int(dados.get("moedas", 0))
+        except (ValueError, TypeError):
+            saldo_atual = 0
+
+        try:
+            ultima_mensagem_atual = int(
+                dados.get("ultima_mensagem", 0)
+            )
+        except (ValueError, TypeError):
+            ultima_mensagem_atual = 0
+
+        # Recalcula usando os valores reais do Firebase.
+        if agora - ultima_mensagem_atual < INTERVALO_RECOMPENSA:
+
+            jogador["moedas"] = saldo_atual
+            jogador["ultima_mensagem"] = ultima_mensagem_atual
+
+            return
+
+        novas_moedas = saldo_atual + RECOMPENSA
+
+        # Só atualizamos a memória depois que a consulta
+        # confirmou os valores atuais.
+        sucesso = firebase_atualizar_jogador(
+            channel_id,
+            {
+                "nome": nome,
+                "channelId": channel_id,
+                "moedas": novas_moedas,
+                "ultima_mensagem": agora
+            }
+        )
+
+        if not sucesso:
+            return
+
+        jogador["nome"] = nome
+        jogador["moedas"] = novas_moedas
+        jogador["ultima_mensagem"] = agora
+
+    print(
+        f"[MOEDAS] {nome} recebeu "
+        f"{RECOMPENSA} moeda(s). "
+        f"Total: {novas_moedas}"
+    )
+
+
+def descontar_moedas(channel_id, nome, preco):
+
+    with lock_jogadores:
+
+        # Sempre consulta o Firebase imediatamente antes
+        # de calcular e aplicar o desconto.
+        dados = firebase_buscar_jogador(channel_id)
+
+        if dados is None:
+
+            print(
+                "[MOEDAS] Não foi possível consultar "
+                "o saldo do jogador."
+            )
+
+            return None, 0
+
+        try:
+            saldo = int(dados.get("moedas", 0))
+
+        except (ValueError, TypeError):
+            saldo = 0
+
+        if saldo < preco:
+            return False, saldo
+
+        novo_saldo = saldo - preco
+
+        sucesso = firebase_atualizar_jogador(
+            channel_id,
+            {
+                "nome": nome,
+                "channelId": channel_id,
+                "moedas": novo_saldo
+            }
+        )
+
+        if not sucesso:
+            return None, saldo
+
+        if channel_id in jogadores:
+
+            jogadores[channel_id]["moedas"] = novo_saldo
+            jogadores[channel_id]["nome"] = nome
+
+        return True, novo_saldo
+
+
+# ============================================================
+# GITHUB - CATÁLOGO DE SONS
+# ============================================================
+
+def carregar_catalogo(forcar=False):
+
+    agora = time.time()
+
+    with lock_catalogo:
+
+        if (
+            not forcar
+            and catalogo_cache["sons"]
+            and agora - catalogo_cache["atualizado"]
+            < INTERVALO_CACHE_SONS
+        ):
+
+            return catalogo_cache["sons"]
+
+        print("[SONS] Atualizando catálogo do GitHub...")
+
+        try:
+
+            resposta = sessao.get(
+                GITHUB_API,
+                headers={
+                    "User-Agent": "YouTubeChatBot"
+                },
+                timeout=TIMEOUT_FIREBASE
+            )
+
+            resposta.raise_for_status()
+
+            arquivos = resposta.json()
+
+            if not isinstance(arquivos, list):
+                raise ValueError("Resposta inválida do GitHub.")
+
+            arquivo_precos = None
+
+            for item in arquivos:
+
+                if (
+                    item.get("type") == "file"
+                    and item.get("name", "").lower() == "precos.json"
+                ):
+
+                    arquivo_precos = item
+                    break
+
+            if not arquivo_precos:
+
+                raise ValueError(
+                    "O arquivo precos.json não existe na raiz."
+                )
+
+            resposta_precos = sessao.get(
+                arquivo_precos["download_url"],
+                timeout=TIMEOUT_FIREBASE
+            )
+
+            resposta_precos.raise_for_status()
+
+            precos = resposta_precos.json()
+
+            if not isinstance(precos, dict):
+                raise ValueError(
+                    "precos.json precisa conter um objeto JSON."
+                )
+
+            precos_normalizados = {
+                str(chave).casefold(): valor
+                for chave, valor in precos.items()
+            }
+
+            novo_catalogo = {}
+
+            for item in arquivos:
+
+                if item.get("type") != "file":
+                    continue
+
+                nome_arquivo = item.get("name", "")
+                nome_lower = nome_arquivo.lower()
+
+                if not nome_lower.endswith(EXTENSOES_AUDIO):
+                    continue
+
+                nome_som = nome_arquivo.rsplit(".", 1)[0]
+
+                preco_original = precos_normalizados.get(
+                    nome_som.casefold()
+                )
+
+                if preco_original is None:
+
+                    print(
+                        f"[SONS] Ignorando {nome_arquivo}: "
+                        "preço não configurado."
+                    )
+
+                    continue
+
+                try:
+
+                    preco = int(preco_original)
+
+                    if preco < 0:
+                        raise ValueError()
+
+                except (ValueError, TypeError):
+
+                    print(
+                        f"[SONS] Preço inválido para {nome_som}."
+                    )
+
+                    continue
+
+                url = item.get("download_url")
+
+                if not url:
+                    continue
+
+                novo_catalogo[nome_som.casefold()] = {
+                    "nome": nome_som,
+                    "arquivo": nome_arquivo,
+                    "preco": preco,
+                    "url": url
+                }
+
+            catalogo_cache["sons"] = novo_catalogo
+            catalogo_cache["atualizado"] = agora
+
+            print(
+                f"[SONS] {len(novo_catalogo)} áudio(s) carregado(s)."
+            )
+
+            return novo_catalogo
+
+        except Exception as erro:
+
+            print("[SONS] Erro ao carregar catálogo:", erro)
+
+            if catalogo_cache["sons"]:
+
+                print(
+                    "[SONS] Utilizando catálogo em cache."
+                )
+
+                return catalogo_cache["sons"]
+
+            return {}
+
+
+# ============================================================
+# USER AGENT
+# ============================================================
+
+def configurar_user_agent():
+
+    metadata = {
+
+        "brands": [
+            {"brand": "Not:A-Brand", "version": "8"},
+            {"brand": "Chromium", "version": "156"}
+        ],
+
+        "fullVersionList": [
+            {"brand": "Not:A-Brand", "version": "8.0.0.0"},
+            {"brand": "Chromium", "version": VERSAO}
+        ],
+
+        "platform": "Linux",
+        "platformVersion": "6.8.0",
+        "architecture": "x86",
+        "model": "",
+        "mobile": False,
+        "bitness": "64",
+        "wow64": False
+    }
+
+    driver.execute_cdp_cmd(
+        "Network.setUserAgentOverride",
+        {
+            "userAgent": USER_AGENT,
+            "acceptLanguage": "pt-BR,pt;q=0.9,en-US;q=0.8",
+            "platform": "Linux",
+            "userAgentMetadata": metadata
+        }
+    )
+
+    print("[NAVEGADOR] User-Agent configurado.")
+
+
+# ============================================================
+# CHROMIUM
+# ============================================================
+
+def abrir_navegador():
+
+    global driver
+
+    print("[NAVEGADOR] Iniciando Chromium...")
+
+    os.makedirs(PERFIL, exist_ok=True)
+
+    opcoes = Options()
+
+    opcoes.binary_location = CHROMIUM
+
+    opcoes.add_argument("--headless=new")
+    opcoes.add_argument("--no-sandbox")
+    opcoes.add_argument("--disable-dev-shm-usage")
+    opcoes.add_argument("--disable-gpu")
+    opcoes.add_argument("--disable-notifications")
+    opcoes.add_argument("--disable-features=UseDBus")
+    opcoes.add_argument("--window-size=1280,900")
+    opcoes.add_argument("--lang=pt-BR")
+
+    opcoes.add_argument(
+        "--user-data-dir=" + PERFIL
+    )
+
+    caminho_driver = (
+        CHROMEDRIVER
+        if os.path.exists(CHROMEDRIVER)
+        else shutil.which("chromedriver")
+    )
+
+    if not caminho_driver:
+
+        raise FileNotFoundError(
+            "ChromeDriver não encontrado."
+        )
+
+    driver = webdriver.Chrome(
+        service=Service(caminho_driver),
+        options=opcoes
+    )
+
+    driver.set_page_load_timeout(60)
+
+    configurar_user_agent()
+
+    print("[NAVEGADOR] Chromium iniciado.")
+
+    return driver
+
+
+# ============================================================
+# ABRIR CHAT
+# ============================================================
+
+def abrir_chat():
+
+    url = (
+        "https://www.youtube.com/live_chat"
+        "?is_popout=1&v=" + LIVE_ID
+    )
+
+    print("[CHAT] Abrindo:", url)
+
+    driver.get(url)
+
+    espera = WebDriverWait(driver, 40)
+
+    espera.until(
+        EC.presence_of_element_located(
+            (By.CSS_SELECTOR, SELETOR_CAMPO)
+        )
+    )
+
+    espera.until(
+        EC.presence_of_element_located(
+            (By.CSS_SELECTOR, "#send-button")
+        )
+    )
+
+    print("[CHAT] Página carregada.")
+    print("[CHAT] Título:", driver.title)
+    print("[CHAT] URL atual:", driver.current_url)
+    print("[CHAT] Campo de mensagem pronto!")
+
+
+# ============================================================
+# LOCALIZAR CAMPO
+# ============================================================
+
+def encontrar_campo_mensagem():
+
+    try:
+
+        return driver.find_element(
+            By.CSS_SELECTOR,
+            SELETOR_CAMPO
+        )
+
+    except Exception:
+        pass
+
+    try:
+
+        return driver.find_element(
+            By.CSS_SELECTOR,
+            "#input[contenteditable]"
+        )
+
+    except Exception:
+        return None
+
+
+# ============================================================
+# DIAGNÓSTICO DE ERROS
+# ============================================================
+
+def diagnosticar_envio():
+
+    global driver
+
+    print("\n========== DIAGNÓSTICO DO ENVIO ==========")
+
+    try:
+
+        dialogos = driver.find_elements(
+            By.CSS_SELECTOR,
+            "yt-live-chat-upsell-dialog-renderer"
+        )
+
+        print(
+            "[DEBUG] Quantidade de avisos:",
+            len(dialogos)
+        )
+
+        for i, dialogo in enumerate(dialogos):
+
+            print(f"\n[DEBUG] AVISO #{i + 1}")
+
+            print(
+                "[DEBUG] Texto:",
+                repr(dialogo.text)
+            )
+
+            print(
+                "[DEBUG] HTML:",
+                dialogo.get_attribute("innerHTML")[:5000]
+            )
+
+        resultado = driver.execute_script("""
+            const campo = document.querySelector(arguments[0]);
+
+            if (!campo) return "Campo não encontrado";
+
+            const rect = campo.getBoundingClientRect();
+
+            const elemento = document.elementFromPoint(
+                rect.left + rect.width / 2,
+                rect.top + rect.height / 2
+            );
+
+            return elemento ? {
+                tag: elemento.tagName,
+                id: elemento.id,
+                classe: elemento.className,
+                texto: elemento.innerText
+            } : null;
+        """, SELETOR_CAMPO)
+
+        print("[DEBUG] Elemento:", resultado)
+
+        caminho = "/sdcard/Download/chat_erro.png"
+
+        driver.save_screenshot(caminho)
+
+        print("[DEBUG] Screenshot salvo em:", caminho)
+
+    except Exception as erro:
+
+        print("[DEBUG] Erro no diagnóstico:", erro)
+
+    print("==========================================\n")
+
+
+# ============================================================
+# ENVIAR MENSAGEM - OTIMIZADO
+# ============================================================
+
+def enviar_mensagem(mensagem):
+
+    if not mensagem or not mensagem.strip():
+        return False
+
+    if not driver:
+        print("[ENVIO] Navegador não iniciado.")
+        return False
+
+    with lock_envio:
+
+        try:
+
+            campo = encontrar_campo_mensagem()
+
+            if not campo:
+                print("[ENVIO] Campo não encontrado.")
+                return False
+
+            driver.execute_script(
+                "arguments[0].focus();",
+                campo
+            )
+
+            texto_atual = (
+                campo.get_attribute("textContent") or ""
+            )
+
+            if texto_atual:
+
+                campo.send_keys(
+                    Keys.CONTROL,
+                    "a"
+                )
+
+                campo.send_keys(Keys.BACKSPACE)
+
+            campo.send_keys(mensagem)
+
+            botao = driver.find_element(
+                By.CSS_SELECTOR,
+                "#send-button"
+            )
+
+            if not botao.is_displayed():
+                print("[ENVIO] Botão não está visível.")
+                diagnosticar_envio()
+                return False
+
+            botao.click()
+
+            try:
+
+                WebDriverWait(
+                    driver,
+                    TIMEOUT_ENVIO,
+                    poll_frequency=0.1
+                ).until(
+                    lambda navegador: not (
+                        navegador.find_element(
+                            By.CSS_SELECTOR,
+                            SELETOR_CAMPO
+                        ).get_attribute("textContent") or ""
+                    ).strip()
+                )
+
+                print("[ENVIO] Mensagem enviada!")
+
+                return True
+
+            except TimeoutException:
+
+                print(
+                    "[ENVIO] O envio não foi confirmado."
+                )
+
+                diagnosticar_envio()
+
+                return False
+
+        except Exception as erro:
+
+            print("[ENVIO] Erro:", erro)
+
+            diagnosticar_envio()
+
+            return False
+
+
+# ============================================================
+# CONTROLE DE COOLDOWN
+# ============================================================
+
+def comando_disponivel(channel_id, tabela, intervalo):
+
+    agora = time.time()
+
+    with lock_cooldown:
+
+        ultimo = tabela.get(channel_id, 0)
+
+        if agora - ultimo < intervalo:
+            return False
+
+        tabela[channel_id] = agora
+
+        return True
+
+
+# ============================================================
+# COMANDO !HELP
+# ============================================================
+
+def comando_help(channel_id, nome):
+
+    if not comando_disponivel(
+        channel_id,
+        ultimo_comando,
+        INTERVALO_COMANDO
+    ):
+        return
+
+    enviar_mensagem(
+        f"{nome}, comandos: !help | !moedas | !sons | !som nome"
+    )
+
+
+# ============================================================
+# COMANDO !MOEDAS
+# ============================================================
+
+def comando_moedas(channel_id, nome):
+
+    if not comando_disponivel(
+        channel_id,
+        ultimo_comando,
+        INTERVALO_COMANDO
+    ):
+        return
+
+    dados = firebase_buscar_jogador(channel_id)
+
+    if dados is None:
+
+        enviar_mensagem(
+            f"{nome}, não consegui consultar seu saldo."
+        )
+
+        return
+
+    try:
+        moedas = int(dados.get("moedas", 0))
+
+    except (ValueError, TypeError):
+        moedas = 0
+
+    with lock_jogadores:
+
+        if channel_id in jogadores:
+            jogadores[channel_id]["moedas"] = moedas
+
+    enviar_mensagem(
+        f"{nome}, você tem {moedas} moedas!"
+    )
+
+
+# ============================================================
+# COMANDO !SONS
+# ============================================================
+
+def comando_sons(channel_id, nome):
+
+    catalogo = carregar_catalogo()
+
+    if not catalogo:
+
+        enviar_mensagem(
+            "Não há sons disponíveis no momento."
+        )
+
+        return
+
+    lista = sorted(
+        catalogo.values(),
+        key=lambda som: som["nome"].casefold()
+    )
+
+    partes = []
+    mensagem_atual = "Sons disponíveis: "
+
+    for som in lista:
+
+        texto = (
+            f'{som["nome"]} ({som["preco"]} moedas)'
+        )
+
+        if len(mensagem_atual) + len(texto) + 3 > 180:
+
+            partes.append(mensagem_atual)
+            mensagem_atual = texto
+
+        else:
+
+            if mensagem_atual != "Sons disponíveis: ":
+                mensagem_atual += " | "
+
+            mensagem_atual += texto
+
+    if mensagem_atual.strip():
+        partes.append(mensagem_atual)
+
+    for parte in partes:
+        enviar_mensagem(parte)
+
+
+# ============================================================
+# COMANDO !SOM
+# ============================================================
+
+def comando_som(channel_id, nome, argumento):
+
+    if not comando_disponivel(
+        channel_id,
+        ultimo_som,
+        INTERVALO_SOM
+    ):
+        return
+
+    if not argumento:
+
+        enviar_mensagem(
+            f"{nome}, use !som nome. Consulte !sons para ver os áudios."
+        )
+
+        return
+
+    nome_pedido = argumento.strip().casefold()
+
+    catalogo = carregar_catalogo()
+
+    som = catalogo.get(nome_pedido)
+
+    if not som:
+
+        enviar_mensagem(
+            f"{nome}, esse som não existe. Use !sons para consultar."
+        )
+
+        return
+
+    preco = som["preco"]
+
+    sucesso, saldo = descontar_moedas(
+        channel_id,
+        nome,
+        preco
+    )
+
+    if sucesso is None:
+
+        enviar_mensagem(
+            f"{nome}, não consegui processar seu pagamento. Tente novamente."
+        )
+
+        return
+
+    if sucesso is False:
+
+        enviar_mensagem(
+            f"{nome}, você precisa de {preco} moedas. "
+            f"Seu saldo: {saldo}."
+        )
+
+        return
+
+    pedido = {
+        "id": next(contador_sons),
+        "nome": som["nome"],
+        "arquivo": som["arquivo"],
+        "url": som["url"],
+        "preco": preco,
+        "jogador": nome
+    }
+
+    fila_sons.put(pedido)
+
+    print(
+        f'[SONS] {nome} pediu {som["nome"]} '
+        f'por {preco} moedas. Saldo restante: {sucesso}'
+    )
+
+    enviar_mensagem(
+        f"{nome}, som {som['nome']} comprado por "
+        f"{preco} moedas! Saldo: {sucesso}."
+    )
+
+
+# ============================================================
+# FLASK - PÁGINA DO OBS
+# ============================================================
+
+app = Flask(__name__)
+
+
+PAGINA_OBS = """
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+<title>Sons do Bot</title>
+
+<style>
+* {
+    box-sizing: border-box;
+}
+
+html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: transparent;
+}
+
+#nome {
+    display: none;
+    position: absolute;
+    bottom: 50px;
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 12px 24px;
+    border-radius: 12px;
+    background: rgba(0, 0, 0, 0.75);
+    color: white;
+    font-family: Arial, sans-serif;
+    font-size: 26px;
+    font-weight: bold;
+    white-space: nowrap;
+}
+</style>
+</head>
+
+<body>
+
+<div id="nome"></div>
+<audio id="audio"></audio>
+
+<script>
+const audio = document.getElementById("audio");
+const nomeElemento = document.getElementById("nome");
+
+let reproduzindo = false;
+let buscando = false;
+
+async function buscarProximo() {
+
+    if (buscando || reproduzindo) return;
+
+    buscando = true;
+
+    try {
+
+        const resposta = await fetch("/api/proximo", {
+            cache: "no-store"
+        });
+
+        if (!resposta.ok) {
+            throw new Error("Erro na API");
+        }
+
+        const dados = await resposta.json();
+
+        if (!dados.som) {
+            buscando = false;
+            setTimeout(buscarProximo, 100);
+            return;
+        }
+
+        reproduzindo = true;
+        buscando = false;
+
+        nomeElemento.textContent = dados.som.nome;
+        nomeElemento.style.display = "block";
+
+        audio.src = dados.som.url;
+
+        await audio.play();
+
+    } catch (erro) {
+
+        console.error("Erro ao buscar/reproduzir:", erro);
+
+        finalizar();
+    }
+}
+
+function finalizar() {
+
+    if (!reproduzindo && !buscando) return;
+
+    reproduzindo = false;
+    buscando = false;
+
+    nomeElemento.style.display = "none";
+    nomeElemento.textContent = "";
+
+    audio.removeAttribute("src");
+    audio.load();
+
+    setTimeout(buscarProximo, 100);
+}
+
+audio.addEventListener("ended", finalizar);
+audio.addEventListener("error", finalizar);
+
+buscarProximo();
+</script>
+
+</body>
+</html>
+"""
+
+
+@app.route("/")
+def pagina_inicial():
+
+    return Response(
+        "Servidor do YouTube Bot está funcionando. "
+        "Abra /obs no navegador do OBS.",
+        mimetype="text/plain"
+    )
+
+
+@app.route("/obs")
+def pagina_obs():
+
+    return Response(
+        PAGINA_OBS,
+        mimetype="text/html"
+    )
+
+
+@app.route("/api/proximo")
+def api_proximo():
+
+    try:
+
+        pedido = fila_sons.get_nowait()
+
+        return jsonify({
+            "som": pedido
+        })
+
+    except queue.Empty:
+
+        return jsonify({
+            "som": None
+        })
+
+
+@app.route("/api/status")
+def api_status():
+
+    return jsonify({
+        "servidor": "online",
+        "sons_na_fila": fila_sons.qsize()
+    })
+
+
+# ============================================================
+# INICIAR FLASK
+# ============================================================
+
+def iniciar_flask():
+
+    def executar():
+
+        print(
+            f"[FLASK] Servidor iniciado na porta {FLASK_PORTA}."
+        )
+
+        app.run(
+            host=FLASK_HOST,
+            port=FLASK_PORTA,
+            debug=False,
+            use_reloader=False,
+            threaded=True
+        )
+
+    thread = threading.Thread(
+        target=executar,
+        daemon=True
+    )
+
+    thread.start()
+
+    time.sleep(0.5)
+
+
+# ============================================================
+# PROCESSAR EVENTOS DO CHAT
+# ============================================================
+
+def processar_eventos_chat():
+
+    print("[CHAT] Processador de mensagens iniciado.")
+
+    while rodando:
+
+        try:
+
+            item = fila_eventos_chat.get(timeout=0.2)
+
+        except queue.Empty:
+            continue
+
+        if item is None:
+            break
+
+        try:
+
+            channel_id = item["channel_id"]
+            nome = item["nome"]
+            mensagem = item["mensagem"]
+
+            processar_jogador(
+                channel_id,
+                nome
+            )
+
+            texto = mensagem.strip()
+            comando = texto.lower()
+
+            if comando == "!help":
+
+                comando_help(
+                    channel_id,
+                    nome
+                )
+
+            elif comando == "!moedas":
+
+                comando_moedas(
+                    channel_id,
+                    nome
+                )
+
+            elif comando == "!sons":
+
+                comando_sons(
+                    channel_id,
+                    nome
+                )
+
+            elif comando == "!som" or comando.startswith("!som "):
+
+                partes = texto.split(maxsplit=1)
+
+                argumento = (
+                    partes[1]
+                    if len(partes) > 1
+                    else ""
+                )
+
+                comando_som(
+                    channel_id,
+                    nome,
+                    argumento
+                )
+
+        except Exception as erro:
+
+            print(
+                "[CHAT] Erro ao processar mensagem:",
+                erro
+            )
+
+        finally:
+            fila_eventos_chat.task_done()
+
+
+# ============================================================
+# RECEBER CHAT - MAIS RÁPIDO
+# ============================================================
+
+def ler_chat(chat):
+
+    print("[CHAT] Monitorando mensagens...")
+
+    while rodando and chat.is_alive():
+
+        try:
+
+            dados = chat.get()
+
+            if chat.is_replay():
+                continue
+
+            for item in dados.sync_items():
+
+                nome = item.author.name
+
+                channel_id = getattr(
+                    item.author,
+                    "channelId",
+                    None
+                )
+
+                mensagem = item.message
+
+                print(
+                    f"[CHAT] {nome} ({channel_id}): {mensagem}"
+                )
+
+                if not channel_id:
+
+                    print(
+                        "[CHAT] Mensagem sem channelId. "
+                        "Ignorando recompensa."
+                    )
+
+                    continue
+
+                fila_eventos_chat.put({
+                    "channel_id": channel_id,
+                    "nome": nome,
+                    "mensagem": mensagem
+                })
+
+            time.sleep(0.05)
+
+        except Exception as erro:
+
+            print("[CHAT] Erro ao ler mensagens:", erro)
+
+            time.sleep(0.5)
+
+
+# ============================================================
+# ENTRADA PELO TERMINAL
+# ============================================================
+
+def receber_mensagens():
+
+    while rodando:
+
+        try:
+
+            mensagem = input()
+
+            if mensagem.strip().lower() == ":sair":
+
+                fila_mensagens.put(None)
+
+                break
+
+            if mensagem.strip():
+                fila_mensagens.put(mensagem)
+
+        except EOFError:
+
+            fila_mensagens.put(None)
+            break
+
+        except Exception as erro:
+
+            print("[TERMINAL] Erro:", erro)
+            break
+
+
+# ============================================================
+# MONITORAR LIVE
+# ============================================================
+
+def monitorar_live():
+
+    global rodando
+
+    while rodando:
+
+        chat = None
+
+        try:
+
+            print("[LIVE] Conectando ao chat...")
+
+            chat = pytchat.create(
+                video_id=LIVE_ID,
+                interruptable=False
+            )
+
+            if not chat.is_alive():
+
+                print(
+                    "[LIVE] A transmissão não está disponível."
+                )
+
+                time.sleep(10)
+                continue
+
+            print("[LIVE] Conectado!")
+
+            thread_chat = threading.Thread(
+                target=ler_chat,
+                args=(chat,),
+                daemon=True
+            )
+
+            thread_chat.start()
+
+            while rodando and chat.is_alive():
+
+                try:
+
+                    while True:
+
+                        mensagem = fila_mensagens.get_nowait()
+
+                        if mensagem is None:
+
+                            rodando = False
+                            break
+
+                        enviar_mensagem(mensagem)
+
+                except queue.Empty:
+                    pass
+
+                time.sleep(0.05)
+
+            print("[LIVE] Conexão encerrada.")
+
+        except Exception as erro:
+
+            print("[LIVE] Erro:", erro)
+
+        finally:
+
+            if chat:
+
+                try:
+                    chat.terminate()
+                except Exception:
+                    pass
+
+        if rodando:
+
+            print(
+                "[LIVE] Tentando reconectar em 10 segundos..."
+            )
+
+            time.sleep(10)
+
+
+# ============================================================
+# ENCERRAR
+# ============================================================
+
+def encerrar():
+
+    global rodando
+    global driver
+
+    rodando = False
+
+    fila_eventos_chat.put(None)
+
+    print("\n[ENCERRANDO] Finalizando bot...")
+
+    if driver:
+
+        try:
+            driver.quit()
+        except Exception:
+            pass
+
+        driver = None
+
+    print("[ENCERRANDO] Bot finalizado.")
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main():
+
+    print("======================================")
+    print("       YOUTUBE CHAT BOT")
+    print("======================================")
+
+    print("[CONFIG] Canal:", CANAL)
+    print("[CONFIG] Live:", LIVE_ID)
+    print("[CONFIG] Recompensa:", RECOMPENSA)
+
+    print(
+        "[CONFIG] Intervalo:",
+        INTERVALO_RECOMPENSA,
+        "segundos"
+    )
+
+    print("[CONFIG] Perfil:", PERFIL)
+
+    try:
+
+        iniciar_flask()
+
+        abrir_navegador()
+
+        abrir_chat()
+
+        thread_processador = threading.Thread(
+            target=processar_eventos_chat,
+            daemon=True
+        )
+
+        thread_processador.start()
+
+        thread_terminal = threading.Thread(
+            target=receber_mensagens,
+            daemon=True
+        )
+
+        thread_terminal.start()
+
+        monitorar_live()
+
+    except KeyboardInterrupt:
+
+        print("\n[MAIN] Interrompido pelo usuário.")
+
+    except Exception as erro:
+
+        print("[MAIN] Erro:", erro)
+
+    finally:
+
+        encerrar()
+
+
+if __name__ == "__main__":
+    main()
