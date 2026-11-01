@@ -1028,12 +1028,12 @@ def comando_som(channel_id, nome, argumento):
 
     print(
         f'[SONS] {nome} pediu {som["nome"]} '
-        f'por {preco} moedas. Saldo restante: {sucesso}'
+        f'por {preco} moedas. Saldo restante: {saldo}'
     )
 
     enviar_mensagem(
         f"{nome}, som {som['nome']} comprado por "
-        f"{preco} moedas! Saldo: {sucesso}."
+        f"{preco} moedas! Saldo: {saldo}."
     )
 
 
