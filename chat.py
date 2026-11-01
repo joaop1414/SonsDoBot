@@ -1073,14 +1073,24 @@ html, body {
     bottom: 50px;
     left: 50%;
     transform: translateX(-50%);
-    padding: 12px 24px;
-    border-radius: 12px;
-    background: rgba(0, 0, 0, 0.75);
+    padding: 4px 8px;
+    background: transparent;
     color: white;
     font-family: Arial, sans-serif;
     font-size: 26px;
     font-weight: bold;
     white-space: nowrap;
+    -webkit-text-stroke: 1.5px #000;
+    paint-order: stroke fill;
+    text-shadow:
+        -2px -2px 0 #000,
+         0   -2px 0 #000,
+         2px -2px 0 #000,
+        -2px  0   0 #000,
+         2px  0   0 #000,
+        -2px  2px 0 #000,
+         0    2px 0 #000,
+         2px  2px 0 #000;
 }
 </style>
 </head>
@@ -1124,7 +1134,7 @@ async function buscarProximo() {
         reproduzindo = true;
         buscando = false;
 
-        nomeElemento.textContent = dados.som.nome;
+        nomeElemento.textContent = dados.som.jogador + " tocou " + dados.som.nome;
         nomeElemento.style.display = "block";
 
         audio.src = dados.som.url;
