@@ -1643,6 +1643,7 @@ def monitorar_live(modo_automatico=False):
     while rodando:
 
         chat = None
+        id_conectado = LIVE_ID
 
         try:
 
@@ -1718,13 +1719,34 @@ def monitorar_live(modo_automatico=False):
 
         if rodando:
             if modo_automatico:
-                # Atualiza também a página do Selenium para que as
-                # mensagens digitadas sejam enviadas à nova live.
-                try:
-                    abrir_chat(LIVE_ID)
-                except Exception as erro:
-                    print("[CHAT] Erro ao abrir o chat da nova live:", erro)
-                    time.sleep(5)
+                # Se a transmissão terminou, procura outra. Se o ID mudou
+                # durante o monitoramento, atualiza o navegador também.
+                novo_id = pegar_live_id(CANAL)
+
+                if novo_id and novo_id != id_conectado:
+                    LIVE_ID = novo_id
+                    print(f"[LIVE] Mudando para a nova transmissão: {LIVE_ID}")
+
+                    try:
+                        abrir_chat(LIVE_ID)
+                    except Exception as erro:
+                        print("[CHAT] Erro ao abrir o chat da nova live:", erro)
+                        time.sleep(5)
+
+                elif not novo_id:
+                    print(
+                        "[LIVE] Nenhuma live ativa encontrada. "
+                        f"Nova busca em {INTERVALO_VERIFICACAO_LIVE}s..."
+                    )
+                    time.sleep(INTERVALO_VERIFICACAO_LIVE)
+
+                else:
+                    print(
+                        "[LIVE] A live atual continua sendo a mais recente. "
+                        f"Nova verificação em {INTERVALO_VERIFICACAO_LIVE}s..."
+                    )
+                    time.sleep(INTERVALO_VERIFICACAO_LIVE)
+
             else:
                 print("[LIVE] Tentando reconectar em 10 segundos...")
                 time.sleep(10)
