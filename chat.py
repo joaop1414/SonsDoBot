@@ -1790,7 +1790,6 @@ def main():
     print("======================================")
 
     print("[CONFIG] Canal:", CANAL)
-    print("[CONFIG] Canal:", CANAL)
     print("[CONFIG] Recompensa:", RECOMPENSA)
 
     print(
@@ -1804,6 +1803,7 @@ def main():
     try:
 
         modo_automatico = selecionar_live_inicial()
+        print("[CONFIG] Live selecionada:", LIVE_ID)
 
         iniciar_flask()
 
