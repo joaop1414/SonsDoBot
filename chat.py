@@ -64,6 +64,9 @@ GITHUB_API = (
 
 INTERVALO_CACHE_SONS = 300
 
+# Preços dos sons armazenados no Realtime Database
+FIREBASE_SONS_URL = FIREBASE_URL + "sons.json"
+
 EXTENSOES_AUDIO = (
     ".mp3",
     ".wav",
@@ -97,7 +100,8 @@ fila_eventos_chat = queue.Queue()
 
 jogadores = {}
 
-ultimo_comando = {}
+ultimo_help = {}
+ultimo_moedas = {}
 ultimo_som = {}
 
 lock_jogadores = threading.Lock()
@@ -359,8 +363,50 @@ def descontar_moedas(channel_id, nome, preco):
 
 
 # ============================================================
-# GITHUB - CATÁLOGO DE SONS
+# CATÁLOGO DE SONS - FIREBASE + GITHUB
 # ============================================================
+
+def carregar_precos_firebase():
+
+    resposta = sessao.get(
+        FIREBASE_SONS_URL,
+        timeout=TIMEOUT_FIREBASE
+    )
+
+    resposta.raise_for_status()
+
+    precos = resposta.json()
+
+    if not isinstance(precos, dict):
+        raise ValueError(
+            "O nó /sons do Firebase precisa conter um objeto JSON."
+        )
+
+    precos_normalizados = {}
+
+    for nome, valor in precos.items():
+
+        if not isinstance(nome, str) or not nome.strip():
+            continue
+
+        # bool é uma subclasse de int em Python, por isso é rejeitado.
+        if isinstance(valor, bool):
+            continue
+
+        try:
+            preco = int(valor)
+        except (ValueError, TypeError, OverflowError):
+            print(f"[SONS] Preço inválido para {nome}.")
+            continue
+
+        if preco < 0 or str(valor).strip() != str(preco):
+            print(f"[SONS] Preço inválido para {nome}.")
+            continue
+
+        precos_normalizados[nome.casefold()] = preco
+
+    return precos_normalizados
+
 
 def carregar_catalogo(forcar=False):
 
@@ -377,10 +423,15 @@ def carregar_catalogo(forcar=False):
 
             return catalogo_cache["sons"]
 
-        print("[SONS] Atualizando catálogo do GitHub...")
+        print("[SONS] Atualizando catálogo...")
 
         try:
 
+            # Os preços agora vêm do Firebase.
+            precos = carregar_precos_firebase()
+
+            # O GitHub continua sendo usado somente para localizar
+            # e obter os arquivos de áudio.
             resposta = sessao.get(
                 GITHUB_API,
                 headers={
@@ -396,43 +447,6 @@ def carregar_catalogo(forcar=False):
             if not isinstance(arquivos, list):
                 raise ValueError("Resposta inválida do GitHub.")
 
-            arquivo_precos = None
-
-            for item in arquivos:
-
-                if (
-                    item.get("type") == "file"
-                    and item.get("name", "").lower() == "precos.json"
-                ):
-
-                    arquivo_precos = item
-                    break
-
-            if not arquivo_precos:
-
-                raise ValueError(
-                    "O arquivo precos.json não existe na raiz."
-                )
-
-            resposta_precos = sessao.get(
-                arquivo_precos["download_url"],
-                timeout=TIMEOUT_FIREBASE
-            )
-
-            resposta_precos.raise_for_status()
-
-            precos = resposta_precos.json()
-
-            if not isinstance(precos, dict):
-                raise ValueError(
-                    "precos.json precisa conter um objeto JSON."
-                )
-
-            precos_normalizados = {
-                str(chave).casefold(): valor
-                for chave, valor in precos.items()
-            }
-
             novo_catalogo = {}
 
             for item in arquivos:
@@ -447,31 +461,15 @@ def carregar_catalogo(forcar=False):
                     continue
 
                 nome_som = nome_arquivo.rsplit(".", 1)[0]
+                chave = nome_som.casefold()
 
-                preco_original = precos_normalizados.get(
-                    nome_som.casefold()
-                )
+                preco = precos.get(chave)
 
-                if preco_original is None:
+                if preco is None:
 
                     print(
                         f"[SONS] Ignorando {nome_arquivo}: "
-                        "preço não configurado."
-                    )
-
-                    continue
-
-                try:
-
-                    preco = int(preco_original)
-
-                    if preco < 0:
-                        raise ValueError()
-
-                except (ValueError, TypeError):
-
-                    print(
-                        f"[SONS] Preço inválido para {nome_som}."
+                        "preço não configurado no Firebase."
                     )
 
                     continue
@@ -481,7 +479,7 @@ def carregar_catalogo(forcar=False):
                 if not url:
                     continue
 
-                novo_catalogo[nome_som.casefold()] = {
+                novo_catalogo[chave] = {
                     "nome": nome_som,
                     "arquivo": nome_arquivo,
                     "preco": preco,
@@ -503,9 +501,7 @@ def carregar_catalogo(forcar=False):
 
             if catalogo_cache["sons"]:
 
-                print(
-                    "[SONS] Utilizando catálogo em cache."
-                )
+                print("[SONS] Utilizando catálogo em cache.")
 
                 return catalogo_cache["sons"]
 
@@ -861,7 +857,7 @@ def comando_help(channel_id, nome):
 
     if not comando_disponivel(
         channel_id,
-        ultimo_comando,
+        ultimo_help,
         INTERVALO_COMANDO
     ):
         return
@@ -879,7 +875,7 @@ def comando_moedas(channel_id, nome):
 
     if not comando_disponivel(
         channel_id,
-        ultimo_comando,
+        ultimo_moedas,
         INTERVALO_COMANDO
     ):
         return
