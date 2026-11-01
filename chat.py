@@ -23,8 +23,13 @@ from selenium.common.exceptions import TimeoutException
 # CONFIGURAÇÕES
 # ============================================================
 
-CANAL = "jp1414"
-LIVE_ID = "GKChJD_lyE4"
+CANAL = "@jp1414"
+LIVE_ID = None
+
+# Quando nenhum ID/link é informado na inicialização, procura
+# automaticamente a transmissão mais recente do canal.
+INTERVALO_VERIFICACAO_LIVE = 20
+TIMEOUT_BUSCA_LIVE = 15
 
 FIREBASE_URL = (
     "https://botdo-6db23-default-rtdb.firebaseio.com/"
@@ -607,11 +612,13 @@ def abrir_navegador():
 # ABRIR CHAT
 # ============================================================
 
-def abrir_chat():
+def abrir_chat(live_id=None):
+
+    live_id = live_id or LIVE_ID
 
     url = (
         "https://www.youtube.com/live_chat"
-        "?is_popout=1&v=" + LIVE_ID
+        "?is_popout=1&v=" + live_id
     )
 
     print("[CHAT] Abrindo:", url)
@@ -1427,9 +1434,211 @@ def receber_mensagens():
 # MONITORAR LIVE
 # ============================================================
 
-def monitorar_live():
+def extrair_live_id(entrada):
 
-    global rodando
+    """Aceita ID puro ou link do YouTube e retorna o ID do vídeo."""
+
+    import re
+    from urllib.parse import urlparse, parse_qs
+
+    texto = (entrada or "").strip()
+
+    if not texto:
+        return None
+
+    if re.fullmatch(r"[a-zA-Z0-9_-]{11}", texto):
+        return texto
+
+    if "://" not in texto:
+        texto = "https://" + texto
+
+    try:
+        url = urlparse(texto)
+        host = (url.netloc or "").lower()
+        caminho = url.path.strip("/")
+
+        if host.endswith("youtu.be"):
+            candidato = caminho.split("/")[0]
+            if re.fullmatch(r"[a-zA-Z0-9_-]{11}", candidato):
+                return candidato
+
+        parametros = parse_qs(url.query)
+        candidato = (parametros.get("v") or [None])[0]
+        if candidato and re.fullmatch(r"[a-zA-Z0-9_-]{11}", candidato):
+            return candidato
+
+        partes = caminho.split("/")
+        for marcador in ("live", "shorts", "embed", "v"):
+            if marcador in partes:
+                indice = partes.index(marcador)
+                if indice + 1 < len(partes):
+                    candidato = partes[indice + 1]
+                    if re.fullmatch(r"[a-zA-Z0-9_-]{11}", candidato):
+                        return candidato
+    except Exception:
+        pass
+
+    return None
+
+
+def live_esta_ativa(video_id):
+
+    """Valida o candidato usando pytchat, sem depender da API oficial."""
+
+    chat = None
+
+    try:
+        chat = pytchat.create(
+            video_id=video_id,
+            interruptable=False
+        )
+
+        if not chat.is_alive():
+            return False
+
+        dados = chat.get()
+
+        if chat.is_replay():
+            return False
+
+        return True
+
+    except Exception as erro:
+        print(f"[LIVE] Não foi possível validar {video_id}: {erro}")
+        return False
+
+    finally:
+        if chat:
+            try:
+                chat.terminate()
+            except Exception:
+                pass
+
+
+def pegar_live_id(handle):
+
+    """
+    Procura a live atual/mais recente do canal.
+    Primeiro verifica /live (incluindo redirecionamentos); depois
+    consulta /streams e /videos para localizar IDs no HTML.
+    """
+
+    import re
+    from urllib.parse import urlparse, parse_qs
+
+    canal = handle.strip().lstrip("@")
+    base = f"https://www.youtube.com/@{canal}"
+
+    cabecalhos = {
+        "User-Agent": USER_AGENT,
+        "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8"
+    }
+
+    encontrados = []
+
+    for sufixo in ("/live", "/streams", "/videos"):
+
+        try:
+            resposta = sessao.get(
+                base + sufixo,
+                headers=cabecalhos,
+                timeout=TIMEOUT_BUSCA_LIVE,
+                allow_redirects=True
+            )
+            resposta.raise_for_status()
+
+            # Se /live redirecionou diretamente para uma transmissão,
+            # tenta extrair o ID da URL final.
+            id_url = extrair_live_id(resposta.url)
+            if id_url and id_url not in encontrados:
+                encontrados.append(id_url)
+
+            html = resposta.text
+
+            padroes = (
+                r'"videoId"\s*:\s*"([a-zA-Z0-9_-]{11})"',
+                r'"externalVideoId"\s*:\s*"([a-zA-Z0-9_-]{11})"',
+                r'"video_id"\s*:\s*"([a-zA-Z0-9_-]{11})"',
+                r'watch\?v=([a-zA-Z0-9_-]{11})',
+                r'/live/([a-zA-Z0-9_-]{11})'
+            )
+
+            ids_pagina = []
+            for padrao in padroes:
+                ids_pagina.extend(re.findall(padrao, html))
+
+            # Mantém a ordem em que os IDs aparecem no HTML.
+            for candidato in ids_pagina:
+                if candidato not in encontrados:
+                    encontrados.append(candidato)
+
+        except Exception as erro:
+            print(f"[LIVE] Erro ao consultar {sufixo}: {erro}")
+
+        # Se /live trouxe um ID válido, não precisamos consultar
+        # as páginas de vídeos antigos.
+        if sufixo == "/live":
+            for candidato in encontrados:
+                if live_esta_ativa(candidato):
+                    return candidato
+
+    # Em /streams e /videos podem aparecer vídeos antigos.
+    # Testa os candidatos até encontrar uma transmissão ativa.
+    for candidato in encontrados:
+        if live_esta_ativa(candidato):
+            return candidato
+
+    return None
+
+
+def selecionar_live_inicial():
+
+    global LIVE_ID
+
+    print()
+    print("[LIVE] Informe o ID/link de uma live.")
+    print("[LIVE] Pressione ENTER para detectar automaticamente a live mais recente.")
+
+    try:
+        entrada = input("ID ou link (ENTER = automático): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        entrada = ""
+
+    if entrada:
+        live_id = extrair_live_id(entrada)
+
+        if not live_id:
+            raise ValueError("O ID/link informado não é válido.")
+
+        if not live_esta_ativa(live_id):
+            raise RuntimeError(
+                "O ID informado não parece ser uma transmissão ao vivo ativa."
+            )
+
+        LIVE_ID = live_id
+        print(f"[LIVE] Live manual selecionada: {LIVE_ID}")
+        return False
+
+    print(f"[LIVE] Modo automático ativado para {CANAL}.")
+    while rodando and not LIVE_ID:
+        live_id = pegar_live_id(CANAL)
+        if live_id:
+            LIVE_ID = live_id
+            print(f"[LIVE] Live encontrada: {LIVE_ID}")
+            break
+
+        print(
+            f"[LIVE] Nenhuma transmissão ativa encontrada. "
+            f"Nova tentativa em {INTERVALO_VERIFICACAO_LIVE}s..."
+        )
+        time.sleep(INTERVALO_VERIFICACAO_LIVE)
+
+    return True
+
+
+def monitorar_live(modo_automatico=False):
+
+    global rodando, LIVE_ID
 
     while rodando:
 
@@ -1437,7 +1646,7 @@ def monitorar_live():
 
         try:
 
-            print("[LIVE] Conectando ao chat...")
+            print(f"[LIVE] Conectando ao chat: {LIVE_ID}")
 
             chat = pytchat.create(
                 video_id=LIVE_ID,
@@ -1446,11 +1655,8 @@ def monitorar_live():
 
             if not chat.is_alive():
 
-                print(
-                    "[LIVE] A transmissão não está disponível."
-                )
-
-                time.sleep(10)
+                print("[LIVE] A transmissão não está disponível.")
+                time.sleep(5)
                 continue
 
             print("[LIVE] Conectado!")
@@ -1460,19 +1666,34 @@ def monitorar_live():
                 args=(chat,),
                 daemon=True
             )
-
             thread_chat.start()
+
+            proxima_verificacao = time.time() + INTERVALO_VERIFICACAO_LIVE
 
             while rodando and chat.is_alive():
 
+                # No modo automático, acompanha o canal e troca
+                # de transmissão quando um novo ID for detectado.
+                if modo_automatico and time.time() >= proxima_verificacao:
+
+                    proxima_verificacao = (
+                        time.time() + INTERVALO_VERIFICACAO_LIVE
+                    )
+
+                    novo_id = pegar_live_id(CANAL)
+
+                    if novo_id and novo_id != LIVE_ID:
+                        print(
+                            f"[LIVE] Nova transmissão detectada: {novo_id}"
+                        )
+                        LIVE_ID = novo_id
+                        break
+
                 try:
-
                     while True:
-
                         mensagem = fila_mensagens.get_nowait()
 
                         if mensagem is None:
-
                             rodando = False
                             break
 
@@ -1486,25 +1707,27 @@ def monitorar_live():
             print("[LIVE] Conexão encerrada.")
 
         except Exception as erro:
-
             print("[LIVE] Erro:", erro)
 
         finally:
-
             if chat:
-
                 try:
                     chat.terminate()
                 except Exception:
                     pass
 
         if rodando:
-
-            print(
-                "[LIVE] Tentando reconectar em 10 segundos..."
-            )
-
-            time.sleep(10)
+            if modo_automatico:
+                # Atualiza também a página do Selenium para que as
+                # mensagens digitadas sejam enviadas à nova live.
+                try:
+                    abrir_chat(LIVE_ID)
+                except Exception as erro:
+                    print("[CHAT] Erro ao abrir o chat da nova live:", erro)
+                    time.sleep(5)
+            else:
+                print("[LIVE] Tentando reconectar em 10 segundos...")
+                time.sleep(10)
 
 
 # ============================================================
@@ -1545,7 +1768,7 @@ def main():
     print("======================================")
 
     print("[CONFIG] Canal:", CANAL)
-    print("[CONFIG] Live:", LIVE_ID)
+    print("[CONFIG] Canal:", CANAL)
     print("[CONFIG] Recompensa:", RECOMPENSA)
 
     print(
@@ -1558,11 +1781,13 @@ def main():
 
     try:
 
+        modo_automatico = selecionar_live_inicial()
+
         iniciar_flask()
 
         abrir_navegador()
 
-        abrir_chat()
+        abrir_chat(LIVE_ID)
 
         thread_processador = threading.Thread(
             target=processar_eventos_chat,
@@ -1578,7 +1803,7 @@ def main():
 
         thread_terminal.start()
 
-        monitorar_live()
+        monitorar_live(modo_automatico)
 
     except KeyboardInterrupt:
 
