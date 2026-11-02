@@ -252,63 +252,63 @@ def processar_jogador(channel_id, nome):
 
     agora = int(time.time())
 
-    # Primeiro verificamos a memória para evitar consultas
-    # desnecessárias ao Firebase em todas as mensagens.
+    # Consulta a memória rapidamente e libera o lock antes
+    # de qualquer operação de rede.
     with lock_jogadores:
-
         ultimo_pagamento = jogador["ultima_mensagem"]
 
-        if agora - ultimo_pagamento < INTERVALO_RECOMPENSA:
-            return
+    if agora - ultimo_pagamento < INTERVALO_RECOMPENSA:
+        return
 
-        # A partir daqui existe a possibilidade de alterar
-        # o saldo. Portanto, consultamos o Firebase novamente.
-        dados = firebase_buscar_jogador(channel_id)
+    # O Firebase é consultado fora do lock global para que
+    # uma recompensa lenta não bloqueie outros acessos locais.
+    dados = firebase_buscar_jogador(channel_id)
 
-        if dados is None:
-            print(
-                "[MOEDAS] Recompensa cancelada: "
-                "não foi possível consultar o Firebase."
-            )
-            return
+    if dados is None:
+        print(
+            "[MOEDAS] Recompensa cancelada: "
+            "não foi possível consultar o Firebase."
+        )
+        return
 
-        try:
-            saldo_atual = int(dados.get("moedas", 0))
-        except (ValueError, TypeError):
-            saldo_atual = 0
+    try:
+        saldo_atual = int(dados.get("moedas", 0))
+    except (ValueError, TypeError):
+        saldo_atual = 0
 
-        try:
-            ultima_mensagem_atual = int(
-                dados.get("ultima_mensagem", 0)
-            )
-        except (ValueError, TypeError):
-            ultima_mensagem_atual = 0
+    try:
+        ultima_mensagem_atual = int(
+            dados.get("ultima_mensagem", 0)
+        )
+    except (ValueError, TypeError):
+        ultima_mensagem_atual = 0
 
-        # Recalcula usando os valores reais do Firebase.
-        if agora - ultima_mensagem_atual < INTERVALO_RECOMPENSA:
+    # Confere novamente o intervalo usando o valor oficial.
+    if agora - ultima_mensagem_atual < INTERVALO_RECOMPENSA:
 
+        with lock_jogadores:
             jogador["moedas"] = saldo_atual
             jogador["ultima_mensagem"] = ultima_mensagem_atual
 
-            return
+        return
 
-        novas_moedas = saldo_atual + RECOMPENSA
+    novas_moedas = saldo_atual + RECOMPENSA
 
-        # Só atualizamos a memória depois que a consulta
-        # confirmou os valores atuais.
-        sucesso = firebase_atualizar_jogador(
-            channel_id,
-            {
-                "nome": nome,
-                "channelId": channel_id,
-                "moedas": novas_moedas,
-                "ultima_mensagem": agora
-            }
-        )
+    sucesso = firebase_atualizar_jogador(
+        channel_id,
+        {
+            "nome": nome,
+            "channelId": channel_id,
+            "moedas": novas_moedas,
+            "ultima_mensagem": agora
+        }
+    )
 
-        if not sucesso:
-            return
+    if not sucesso:
+        return
 
+    # Atualiza o cache local somente depois da confirmação.
+    with lock_jogadores:
         jogador["nome"] = nome
         jogador["moedas"] = novas_moedas
         jogador["ultima_mensagem"] = agora
