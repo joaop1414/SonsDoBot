@@ -1323,19 +1323,20 @@ def comando_loja(channel_id, nome, argumento=""):
     if not partes:
         enviar_mensagem(
             f"🛒 Loja: boost2x {PRECO_BOOST_2X} moedas (2x recompensas/10min); "
-            f"sortepesca {PRECO_SORTE_PESCA} moedas (mais raros e baús/10min). "
-            f"Comprar: !loja comprar boost2x ou !loja comprar sortepesca."
+            f"sortepesca {PRECO_SORTE_PESCA} moedas (mais raros e baús/10min); "
+            f"sorte_caca {PRECO_BOOST_CACA} moedas (mais itens na caça/10min). "
+            f"Comprar: !loja comprar boost2x, sortepesca ou sorte_caca."
         )
         return
 
     if len(partes) != 2 or partes[0].casefold() != "comprar":
         enviar_mensagem(
-            f"{nome}, use !loja ou !loja comprar boost2x/sortepesca."
+            f"{nome}, use !loja ou !loja comprar boost2x/sortepesca/sorte_caca."
         )
         return
 
     item = partes[1].casefold()
-    if item not in ("boost2x", "dobro", "sortepesca", "sorte"):
+    if item not in ("boost2x", "dobro", "sortepesca", "sorte", "sorte_caca", "caca"):
         enviar_mensagem(f"{nome}, esse item não existe. Consulte !loja.")
         return
 
@@ -1355,6 +1356,13 @@ def comando_loja(channel_id, nome, argumento=""):
             inicio = max(agora, ler_int(dados, campo_tempo))
             novo_tempo = inicio + duracao
             descricao = "Boost 2x"
+        elif item in ("sorte_caca", "caca"):
+            preco = PRECO_BOOST_CACA
+            campo_tempo = "sorte_caca_ate"
+            duracao = DURACAO_BOOST_CACA
+            inicio = max(agora, ler_int(dados, campo_tempo))
+            novo_tempo = inicio + duracao
+            descricao = "Boost de caça"
         else:
             preco = PRECO_SORTE_PESCA
             campo_tempo = "sorte_pesca_ate"
