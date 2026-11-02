@@ -8,6 +8,9 @@ import pytchat
 import shutil
 import itertools
 import random
+import re
+import unicodedata
+from datetime import datetime, timezone
 
 from flask import Flask, jsonify, Response
 from selenium import webdriver
@@ -67,6 +70,12 @@ INTERVALO_DIARIO = 86400
 
 INTERVALO_PESCA = 60
 INTERVALO_PESCA_COM_SORTE = 30
+INTERVALO_TRABALHO = 300
+INTERVALO_CACA = 120
+INTERVALO_CACA_COM_BOOST = 60
+PRECO_BOOST_CACA = 200
+DURACAO_BOOST_CACA = 600
+INTERVALO_SOM_GRATIS = 600
 PRECO_BOOST_2X = 100
 DURACAO_BOOST_2X = 600
 
@@ -129,6 +138,15 @@ ultimo_perfil = {}
 ultimo_top = {}
 ultimo_pesca = {}
 ultimo_loja = {}
+ultimo_trabalho = {}
+ultimo_caca = {}
+ultimo_som_gratis = {}
+ultimo_dado = {}
+ultimo_tempo = {}
+ultimo_inventario = {}
+LIVE_INICIO_TIMESTAMP = None
+primeiro_espectador_premiado = False
+lock_primeiro_espectador = threading.Lock()
 
 sorteio_ativo = False
 sorteio_premio = 0
@@ -966,6 +984,27 @@ def comando_disponivel(channel_id, tabela, intervalo):
 # COMANDO !HELP
 # ============================================================
 
+def enviar_mensagem_dividida(mensagem, limite=180):
+    palavras = str(mensagem).split()
+    partes, atual = [], ""
+    for palavra in palavras:
+        candidato = palavra if not atual else atual + " " + palavra
+        if len(candidato) > limite and atual:
+            partes.append(atual)
+            atual = palavra
+        else:
+            atual = candidato
+    if atual:
+        partes.append(atual)
+    for parte in partes:
+        enviar_mensagem(parte)
+
+
+def normalizar_texto(texto):
+    texto = unicodedata.normalize("NFKD", str(texto))
+    return "".join(c for c in texto if not unicodedata.combining(c)).casefold().strip()
+
+
 def comando_help(channel_id, nome):
 
     if not comando_disponivel(
@@ -975,8 +1014,10 @@ def comando_help(channel_id, nome):
     ):
         return
 
-    enviar_mensagem(
-        f"{nome}, comandos: !moedas | !diario | !top | !perfil | !pescar | !sorteio | !loja | !sons | !som nome"
+    enviar_mensagem_dividida(
+        f"{nome}, comandos: !moedas | !diario | !top | !perfil | !pescar | !caçar | "
+        "!trabalhar | !pagar | !dado | !tempo | !sorteio | !loja | !sons | "
+        "!som nome | !somgratis | !inventário | !usar item | !descartar item"
     )
 
 
