@@ -497,8 +497,9 @@ def carregar_catalogo(forcar=False):
                         f"[SONS] Ignorando {nome_arquivo}: "
                         "preço não configurado no Firebase."
                     )
+                    continue
 
-                    continue                url = item.get("download_url")
+                url = item.get("download_url")
 
                 if not url:
                     continue
@@ -998,7 +999,6 @@ def comando_som(channel_id, nome, argumento):
         channel_id,
         ultimo_som,        INTERVALO_SOM
     ):        return
-
     if not argumento:
 
         enviar_mensagem(
@@ -1497,8 +1497,7 @@ async function buscarProximo() {
 
     try {
 
-        const resposta = await fetch("/api/proximo", {
-            cache: "no-store"
+        const resposta = await fetch("/api/proximo", {            cache: "no-store"
         });
 
         if (!resposta.ok) {
@@ -1997,8 +1996,7 @@ def pegar_live_id(handle):
             for padrao in padroes:
                 ids_pagina.extend(re.findall(padrao, html))
 
-            # Mantém a ordem em que os IDs aparecem no HTML.
-            for candidato in ids_pagina:
+            # Mantém a ordem em que os IDs aparecem no HTML.            for candidato in ids_pagina:
                 if candidato not in encontrados:
                     encontrados.append(candidato)
 
