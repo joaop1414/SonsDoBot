@@ -498,7 +498,6 @@ def carregar_catalogo(forcar=False):
                     )
 
                     continue
-
                 url = item.get("download_url")
 
                 if not url:
@@ -997,8 +996,7 @@ def comando_som(channel_id, nome, argumento):
 
     if not comando_disponivel(
         channel_id,
-        ultimo_som,
-        INTERVALO_SOM
+        ultimo_som,        INTERVALO_SOM
     ):
         return
 
@@ -1089,42 +1087,43 @@ def ler_int(dados, chave, padrao=0):
 
 
 def comando_diario(channel_id, nome):
-    dados = firebase_buscar_jogador(channel_id)
-    if dados is None:
-        enviar_mensagem(f"{nome}, não consegui consultar sua conta.")
-        return
+    with lock_transacoes:
+        dados = firebase_buscar_jogador(channel_id)
+        if dados is None:
+            enviar_mensagem(f"{nome}, não consegui consultar sua conta.")
+            return
 
-    agora = int(time.time())
-    ultimo = ler_int(dados, "ultimo_diario")
-    restante = INTERVALO_DIARIO - (agora - ultimo)
+        agora = int(time.time())
+        ultimo = ler_int(dados, "ultimo_diario")
+        restante = INTERVALO_DIARIO - (agora - ultimo)
 
-    if restante > 0:
-        horas = restante // 3600
-        minutos = (restante % 3600) // 60
-        enviar_mensagem(
-            f"{nome}, você já resgatou seu diário! "
-            f"Volte em {horas}h {minutos}min."
-        )
-        return
+        if restante > 0:
+            horas = restante // 3600
+            minutos = (restante % 3600) // 60
+            enviar_mensagem(
+                f"{nome}, você já resgatou seu diário! "
+                f"Volte em {horas}h {minutos}min."
+            )
+            return
 
-    boost_ate = ler_int(dados, "boost_ate")
-    multiplicador = 2 if boost_ate > agora else 1
-    ganho = RECOMPENSA_DIARIA * multiplicador
-    saldo = ler_int(dados, "moedas") + ganho
+        boost_ate = ler_int(dados, "boost_ate")
+        multiplicador = 2 if boost_ate > agora else 1
+        ganho = RECOMPENSA_DIARIA * multiplicador
+        saldo = ler_int(dados, "moedas") + ganho
 
-    sucesso = firebase_atualizar_jogador(channel_id, {
-        "nome": nome,
-        "channelId": channel_id,
-        "moedas": saldo,
-        "ultimo_diario": agora
-    })
-    if not sucesso:
-        enviar_mensagem(f"{nome}, não consegui entregar sua recompensa.")
-        return
+        sucesso = firebase_atualizar_jogador(channel_id, {
+            "nome": nome,
+            "channelId": channel_id,
+            "moedas": saldo,
+            "ultimo_diario": agora
+        })
+        if not sucesso:
+            enviar_mensagem(f"{nome}, não consegui entregar sua recompensa.")
+            return
 
-    with lock_jogadores:
-        if channel_id in jogadores:
-            jogadores[channel_id]["moedas"] = saldo
+        with lock_jogadores:
+            if channel_id in jogadores:
+                jogadores[channel_id]["moedas"] = saldo
 
     enviar_mensagem(
         f"🎁 {nome}, você recebeu {ganho} moedas do diário! "
@@ -1278,57 +1277,58 @@ def comando_pescar(channel_id, nome):
         k=1
     )[0]
 
-    dados = firebase_buscar_jogador(channel_id)
-    if dados is None:
-        enviar_mensagem(f"{nome}, não consegui iniciar sua pescaria.")
-        return
+    with lock_transacoes:
+        dados = firebase_buscar_jogador(channel_id)
+        if dados is None:
+            enviar_mensagem(f"{nome}, não consegui iniciar sua pescaria.")
+            return
 
-    saldo = ler_int(dados, "moedas")
-    boost_ate = ler_int(dados, "boost_ate")
-    multiplicador = 2 if boost_ate > int(time.time()) else 1
-    ganho = 0
-    perda = 0
+        saldo = ler_int(dados, "moedas")
+        boost_ate = ler_int(dados, "boost_ate")
+        multiplicador = 2 if boost_ate > int(time.time()) else 1
+        ganho = 0
+        perda = 0
 
-    if resultado == "comum":
-        ganho = random.randint(2, 5)
-        mensagem = f"🐟 {nome} pescou um peixe comum e ganhou {ganho} moedas!"
-    elif resultado == "raro":
-        ganho = random.randint(6, 12)
-        mensagem = f"🐠 {nome} pescou um peixe raro e ganhou {ganho} moedas!"
-    elif resultado == "bau":
-        ganho = random.randint(15, 30)
-        mensagem = f"💎 {nome} encontrou um baú e ganhou {ganho} moedas!"
-    elif resultado == "lixo":
-        mensagem = f"👢 {nome} pescou uma bota velha. Que azar!"
-    elif resultado == "tubarao":
-        perda = min(saldo, random.randint(2, 5))
-        mensagem = f"🦈 Um tubarão atacou {nome}! Você perdeu {perda} moedas!"
-    else:
-        ganho = 100
-        mensagem = f"🌟 LENDÁRIO! {nome} pescou um peixe lendário e ganhou 100 moedas!"
+        if resultado == "comum":
+            ganho = random.randint(2, 5)
+            mensagem = f"🐟 {nome} pescou um peixe comum e ganhou {ganho} moedas!"
+        elif resultado == "raro":
+            ganho = random.randint(6, 12)
+            mensagem = f"🐠 {nome} pescou um peixe raro e ganhou {ganho} moedas!"
+        elif resultado == "bau":
+            ganho = random.randint(15, 30)
+            mensagem = f"💎 {nome} encontrou um baú e ganhou {ganho} moedas!"
+        elif resultado == "lixo":
+            mensagem = f"👢 {nome} pescou uma bota velha. Que azar!"
+        elif resultado == "tubarao":
+            perda = min(saldo, random.randint(2, 5))
+            mensagem = f"🦈 Um tubarão atacou {nome}! Você perdeu {perda} moedas!"
+        else:
+            ganho = 100
+            mensagem = f"🌟 LENDÁRIO! {nome} pescou um peixe lendário e ganhou 100 moedas!"
 
-    ganho *= multiplicador
-    novo_saldo = saldo + ganho - perda
-    pescarias = ler_int(dados, "pescarias") + 1
-    tesouros = ler_int(dados, "tesouros") + (1 if resultado == "bau" else 0)
-    moedas_pescando = ler_int(dados, "moedas_pescando") + ganho
+        ganho *= multiplicador
+        novo_saldo = saldo + ganho - perda
+        pescarias = ler_int(dados, "pescarias") + 1
+        tesouros = ler_int(dados, "tesouros") + (1 if resultado == "bau" else 0)
+        moedas_pescando = ler_int(dados, "moedas_pescando") + ganho
 
-    atualizacao = {
-        "nome": nome,
-        "channelId": channel_id,
-        "moedas": novo_saldo,
-        "pescarias": pescarias,
-        "tesouros": tesouros,
-        "moedas_pescando": moedas_pescando
-    }
+        atualizacao = {
+            "nome": nome,
+            "channelId": channel_id,
+            "moedas": novo_saldo,
+            "pescarias": pescarias,
+            "tesouros": tesouros,
+            "moedas_pescando": moedas_pescando
+        }
 
-    if not firebase_atualizar_jogador(channel_id, atualizacao):
-        enviar_mensagem(f"{nome}, houve um erro ao registrar sua pescaria.")
-        return
+        if not firebase_atualizar_jogador(channel_id, atualizacao):
+            enviar_mensagem(f"{nome}, houve um erro ao registrar sua pescaria.")
+            return
 
-    with lock_jogadores:
-        if channel_id in jogadores:
-            jogadores[channel_id]["moedas"] = novo_saldo
+        with lock_jogadores:
+            if channel_id in jogadores:
+                jogadores[channel_id]["moedas"] = novo_saldo
 
     enviar_mensagem(mensagem + f" Saldo: {novo_saldo}.")
 
@@ -1497,7 +1497,6 @@ const nomeElemento = document.getElementById("nome");
 
 let reproduzindo = false;
 let buscando = false;
-
 async function buscarProximo() {
 
     if (buscando || reproduzindo) return;
@@ -1997,8 +1996,7 @@ def pegar_live_id(handle):
 
             html = resposta.text
             padroes = (
-                r'"videoId"\s*:\s*"([a-zA-Z0-9_-]{11})"',
-                r'"externalVideoId"\s*:\s*"([a-zA-Z0-9_-]{11})"',
+                r'"videoId"\s*:\s*"([a-zA-Z0-9_-]{11})"',                r'"externalVideoId"\s*:\s*"([a-zA-Z0-9_-]{11})"',
                 r'"video_id"\s*:\s*"([a-zA-Z0-9_-]{11})"',
                 r'watch\?v=([a-zA-Z0-9_-]{11})',
                 r'/live/([a-zA-Z0-9_-]{11})'
