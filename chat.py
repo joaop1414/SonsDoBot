@@ -760,14 +760,10 @@ def enviar_mensagem(mensagem):
 
         try:
 
-            # Localiza o editor usando uma única consulta no navegador.
-            campo = driver.execute_script("""
-                return document.querySelector(arguments[0]) ||
-                       document.querySelector("#input[contenteditable]");
-            """, SELETOR_CAMPO)
+            campo = encontrar_campo_mensagem()
 
             if not campo:
-                print("[ENVIO] Campo de mensagem não encontrado.")
+                print("[ENVIO] Campo não encontrado.")
                 return False
 
             driver.execute_script(
@@ -775,59 +771,72 @@ def enviar_mensagem(mensagem):
                 campo
             )
 
-            # Limpa somente se já houver texto no editor.
-            texto_atual = driver.execute_script(
-                "return arguments[0].textContent || '';",
-                campo
+            texto_atual = (
+                campo.get_attribute("textContent") or ""
             )
 
             if texto_atual:
-                campo.send_keys(Keys.CONTROL, "a")
+
+                campo.send_keys(
+                    Keys.CONTROL,
+                    "a"
+                )
+
                 campo.send_keys(Keys.BACKSPACE)
 
-            # Usa o protocolo de entrada do Chromium, que já era
-            # utilizado na versão anterior e é reconhecido pelo editor.
-            driver.execute_cdp_cmd(
-                "Input.insertText",
-                {"text": mensagem}
+            # Insere o texto pelo protocolo CDP do Chromium.
+            # Se falhar, usa a digitação tradicional como alternativa.
+            try:
+                driver.execute_cdp_cmd(
+                    "Input.insertText",
+                    {"text": mensagem}
+                )
+            except Exception as erro_cdp:
+                print(
+                    "[ENVIO] Inserção rápida falhou; "
+                    "usando digitação tradicional:",
+                    erro_cdp
+                )
+                campo.send_keys(mensagem)
+
+            botao = driver.find_element(
+                By.CSS_SELECTOR,
+                "#send-button"
             )
 
-            # Aguarda brevemente o YouTube habilitar o botão após
-            # receber o evento de entrada.
+            if not botao.is_displayed():
+                print("[ENVIO] Botão não está visível.")
+                diagnosticar_envio()
+                return False
+
+            botao.click()
+
             try:
+
                 WebDriverWait(
                     driver,
-                    1.5,
-                    poll_frequency=0.05
+                    TIMEOUT_ENVIO,
+                    poll_frequency=0.1
                 ).until(
-                    lambda navegador: navegador.execute_script("""
-                        const botao = document.querySelector("#send-button");
-                        return !!botao &&
-                               !botao.disabled &&
-                               botao.getAttribute("aria-disabled") !== "true";
-                    """)
+                    lambda navegador: not (
+                        navegador.find_element(
+                            By.CSS_SELECTOR,
+                            SELETOR_CAMPO
+                        ).get_attribute("textContent") or ""
+                    ).strip()
                 )
+
+                print("[ENVIO] Mensagem enviada!")
+                return True
+
             except TimeoutException:
-                print("[ENVIO] O YouTube não habilitou o botão de envio.")
+
+                print(
+                    "[ENVIO] O envio não foi confirmado."
+                )
+
+                diagnosticar_envio()
                 return False
-
-            # Clica no botão já habilitado sem uma chamada Selenium extra.
-            clicou = driver.execute_script("""
-                const botao = document.querySelector("#send-button");
-                if (!botao || botao.disabled ||
-                    botao.getAttribute("aria-disabled") === "true") {
-                    return false;
-                }
-                botao.click();
-                return true;
-            """)
-
-            if not clicou:
-                print("[ENVIO] Não foi possível clicar no botão.")
-                return False
-
-            print("[ENVIO] Clique de envio realizado.")
-            return True
 
         except Exception as erro:
 
