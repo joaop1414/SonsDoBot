@@ -1280,11 +1280,9 @@ def comando_loja(channel_id, nome, argumento=""):
     partes = argumento.strip().split()
     if not partes:
         enviar_mensagem(
-            f"🛒 Loja: boost2x = {PRECO_BOOST_2X} moedas "
-            f"(dobra suas recompensas por 10 minutos); "
-            f"sortepesca = {PRECO_SORTE_PESCA} moedas "
-            f"(aumenta suas chances de peixes raros e baús por 10 minutos). "
-            f"Compre com !loja comprar boost2x ou !loja comprar sortepesca."
+            f"🛒 Loja: boost2x {PRECO_BOOST_2X} moedas (2x recompensas/10min); "
+            f"sortepesca {PRECO_SORTE_PESCA} moedas (mais raros e baús/10min). "
+            f"Comprar: !loja comprar boost2x ou !loja comprar sortepesca."
         )
         return
 
