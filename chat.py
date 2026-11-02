@@ -57,7 +57,10 @@ USER_AGENT = (
 )
 
 RECOMPENSA = 1
-INTERVALO_RECOMPENSA = 60
+INTERVALO_RECOMPENSA = 30
+BONUS_POR_MENSAGENS = 15
+MENSAGENS_PARA_BONUS = 10
+LIMITE_RECOMPENSA_HORA = 120
 
 RECOMPENSA_DIARIA = 25
 INTERVALO_DIARIO = 86400
@@ -262,7 +265,15 @@ def obter_jogador(channel_id, nome):
     return jogador
 
 
-def processar_jogador(channel_id, nome):
+def processar_jogador(channel_id, nome, mensagem):
+    """
+    Recompensa participação no chat:
+    - 1 moeda a cada 30 segundos com mensagens válidas.
+    - 15 moedas extras a cada 10 mensagens válidas.
+    - No máximo 120 moedas efetivamente creditadas por hora.
+    - Mensagens iguais consecutivas e mensagens enviadas em menos de
+      3 segundos da última mensagem contada não avançam o contador.
+    """
 
     if not channel_id:
         return
@@ -273,15 +284,15 @@ def processar_jogador(channel_id, nome):
         return
 
     agora = int(time.time())
+    texto = (mensagem or "").strip()
+    texto_normalizado = texto.casefold()
 
-    with lock_jogadores:
-        ultimo_pagamento = jogador["ultima_mensagem"]
+    # Comandos e mensagens muito curtas não contam como participação.
+    mensagem_valida = (
+        len(texto) >= 2
+        and not texto.startswith("!")
+    )
 
-    if agora - ultimo_pagamento < INTERVALO_RECOMPENSA:
-        return
-
-    # Serializa alterações de saldo, mas não mantém o lock
-    # usado pelo cache enquanto aguarda a rede.
     with lock_transacoes:
 
         dados = firebase_buscar_jogador(channel_id)
@@ -293,40 +304,84 @@ def processar_jogador(channel_id, nome):
             )
             return
 
-        try:
-            saldo_atual = int(dados.get("moedas", 0))
-        except (ValueError, TypeError):
-            saldo_atual = 0
+        def inteiro(campo, padrao=0):
+            try:
+                return int(dados.get(campo, padrao) or padrao)
+            except (ValueError, TypeError, OverflowError):
+                return padrao
 
-        try:
-            ultima_mensagem_atual = int(
-                dados.get("ultima_mensagem", 0)
+        saldo_atual = inteiro("moedas")
+        ultima_mensagem = inteiro("ultima_mensagem")
+        boost_ate = inteiro("boost_ate")
+        inicio_hora = inteiro("recompensa_hora_inicio")
+        total_hora = inteiro("recompensa_hora_total")
+        mensagens_bonus = inteiro("mensagens_bonus")
+        ultima_contada = inteiro("ultima_mensagem_contada")
+        ultimo_texto = str(dados.get("ultima_mensagem_texto", "") or "").casefold()
+
+        # Inicia uma nova janela de limite por hora.
+        if inicio_hora <= 0 or agora < inicio_hora or agora - inicio_hora >= 3600:
+            inicio_hora = agora
+            total_hora = 0
+
+        # A sequência de conversa é reiniciada após 2 minutos sem participação.
+        if ultima_contada and agora - ultima_contada > 120:
+            mensagens_bonus = 0
+
+        mensagem_contada = False
+
+        if mensagem_valida:
+            intervalo_ok = (
+                ultima_contada == 0
+                or agora - ultima_contada >= 3
             )
-        except (ValueError, TypeError):
-            ultima_mensagem_atual = 0
+            mensagem_repetida = (
+                bool(ultimo_texto)
+                and texto_normalizado == ultimo_texto
+            )
 
-        if agora - ultima_mensagem_atual < INTERVALO_RECOMPENSA:
+            if intervalo_ok and not mensagem_repetida:
+                mensagens_bonus += 1
+                ultima_contada = agora
+                ultimo_texto = texto_normalizado
+                mensagem_contada = True
 
-            with lock_jogadores:
-                jogador["moedas"] = saldo_atual
-                jogador["ultima_mensagem"] = ultima_mensagem_atual
+        # Calcula as duas fontes de recompensa.
+        recompensa_tempo = 0
+        if mensagem_valida and agora - ultima_mensagem >= INTERVALO_RECOMPENSA:
+            recompensa_tempo = RECOMPENSA
+            ultima_mensagem = agora
 
-            return
+        recompensa_bonus = 0
+        if mensagem_contada and mensagens_bonus >= MENSAGENS_PARA_BONUS:
+            recompensa_bonus = BONUS_POR_MENSAGENS
+            mensagens_bonus = 0
 
-        boost_ate = int(dados.get("boost_ate", 0) or 0)
+        recompensa_base = recompensa_tempo + recompensa_bonus
         multiplicador = 2 if boost_ate > agora else 1
-        novas_moedas = saldo_atual + (RECOMPENSA * multiplicador)
+        recompensa_solicitada = recompensa_base * multiplicador
 
-        sucesso = firebase_atualizar_jogador(
-            channel_id,
-            {
-                "nome": nome,
-                "channelId": channel_id,
-                "moedas": novas_moedas,
-                "ultima_mensagem": agora,
-                "boost_ate": boost_ate
-            }
-        )
+        # O limite considera as moedas realmente creditadas, inclusive Boost 2x.
+        restante_hora = max(0, LIMITE_RECOMPENSA_HORA - total_hora)
+        moedas_creditadas = min(recompensa_solicitada, restante_hora)
+
+        novas_moedas = saldo_atual + moedas_creditadas
+        novo_total_hora = total_hora + moedas_creditadas
+
+        atualizacao = {
+            "nome": nome,
+            "channelId": channel_id,
+            "moedas": novas_moedas,
+            "ultima_mensagem": ultima_mensagem,
+            "boost_ate": boost_ate,
+            "recompensa_hora_inicio": inicio_hora,
+            "recompensa_hora_total": novo_total_hora,
+            "mensagens_bonus": mensagens_bonus,
+            "ultima_mensagem_contada": ultima_contada,
+            "ultima_mensagem_texto": ultimo_texto
+        }
+
+        sucesso = firebase_atualizar_jogador(channel_id, atualizacao)
 
         if not sucesso:
             return
@@ -334,13 +389,32 @@ def processar_jogador(channel_id, nome):
         with lock_jogadores:
             jogador["nome"] = nome
             jogador["moedas"] = novas_moedas
-            jogador["ultima_mensagem"] = agora
+            jogador["ultima_mensagem"] = ultima_mensagem
 
-    print(
-        f"[MOEDAS] {nome} recebeu "
-        f"{RECOMPENSA} moeda(s). "
-        f"Total: {novas_moedas}"
-    )
+    if moedas_creditadas:
+        partes = []
+
+        if recompensa_tempo:
+            partes.append(f"{recompensa_tempo} por participação")
+
+        if recompensa_bonus:
+            partes.append(f"{recompensa_bonus} de bônus por mensagens")
+
+        if multiplicador == 2:
+            partes.append("Boost 2x")
+
+        print(
+            f"[MOEDAS] {nome} recebeu {moedas_creditadas} moeda(s) "
+            f"({' + '.join(partes)}). "
+            f"Limite da hora: {novo_total_hora}/{LIMITE_RECOMPENSA_HORA}. "
+            f"Saldo: {novas_moedas}"
+        )
+    elif mensagem_contada and recompensa_base:
+        print(
+            f"[MOEDAS] Limite de {LIMITE_RECOMPENSA_HORA} moedas/hora "
+            f"atingido para {nome}."
+        )
+
 
 
 def descontar_moedas(channel_id, nome, preco):
@@ -1694,7 +1768,8 @@ def processar_recompensas():
         try:
             processar_jogador(
                 item["channel_id"],
-                item["nome"]
+                item["nome"],
+                item.get("mensagem", "")
             )
 
         except Exception as erro:
@@ -1734,7 +1809,8 @@ def processar_eventos_chat():
             # operações no Firebase não atrasem os comandos.
             fila_recompensas.put({
                 "channel_id": channel_id,
-                "nome": nome
+                "nome": nome,
+                "mensagem": mensagem
             })
 
             texto = mensagem.strip()
@@ -2258,13 +2334,9 @@ def main():
     print("======================================")
 
     print("[CONFIG] Canal:", CANAL)
-    print("[CONFIG] Recompensa:", RECOMPENSA)
-
-    print(
-        "[CONFIG] Intervalo:",
-        INTERVALO_RECOMPENSA,
-        "segundos"
-    )
+    print("[CONFIG] Recompensa por participação:", RECOMPENSA, "moeda(s) a cada", INTERVALO_RECOMPENSA, "segundos")
+    print("[CONFIG] Bônus:", BONUS_POR_MENSAGENS, "moedas a cada", MENSAGENS_PARA_BONUS, "mensagens válidas")
+    print("[CONFIG] Limite:", LIMITE_RECOMPENSA_HORA, "moedas por jogador/hora")
 
     print("[CONFIG] Perfil:", PERFIL)
 
