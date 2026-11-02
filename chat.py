@@ -760,70 +760,70 @@ def enviar_mensagem(mensagem):
 
         try:
 
-            # Faz foco, inserção e clique em uma única chamada ao
-            # ChromeDriver, reduzindo a comunicação entre Python e Chromium.
-            resultado = driver.execute_script("""
-                const seletor = arguments[0];
-                const mensagem = arguments[1];
+            # Localiza o editor usando uma única consulta no navegador.
+            campo = driver.execute_script("""
+                return document.querySelector(arguments[0]) ||
+                       document.querySelector("#input[contenteditable]");
+            """, SELETOR_CAMPO)
 
-                const campo =
-                    document.querySelector(seletor) ||
-                    document.querySelector("#input[contenteditable]");
+            if not campo:
+                print("[ENVIO] Campo de mensagem não encontrado.")
+                return False
 
-                const botao = document.querySelector("#send-button");
+            driver.execute_script(
+                "arguments[0].focus();",
+                campo
+            )
 
-                if (!campo) {
-                    return {ok: false, erro: "Campo de mensagem não encontrado."};
-                }
+            # Limpa somente se já houver texto no editor.
+            texto_atual = driver.execute_script(
+                "return arguments[0].textContent || '';",
+                campo
+            )
 
-                if (!botao) {
-                    return {ok: false, erro: "Botão de envio não encontrado."};
-                }
+            if texto_atual:
+                campo.send_keys(Keys.CONTROL, "a")
+                campo.send_keys(Keys.BACKSPACE)
 
-                if (botao.disabled || botao.getAttribute("aria-disabled") === "true") {
-                    return {ok: false, erro: "Botão de envio está desativado."};
-                }
+            # Usa o protocolo de entrada do Chromium, que já era
+            # utilizado na versão anterior e é reconhecido pelo editor.
+            driver.execute_cdp_cmd(
+                "Input.insertText",
+                {"text": mensagem}
+            )
 
-                campo.focus();
-
-                // Usa a edição nativa do navegador para gerar os eventos
-                // esperados pelo editor contenteditable do YouTube.
-                const textoAtual = campo.textContent || "";
-
-                if (textoAtual) {
-                    document.execCommand("selectAll", false, null);
-                    document.execCommand("delete", false, null);
-                }
-
-                const inserido = document.execCommand(
-                    "insertText",
-                    false,
-                    mensagem
-                );
-
-                // Fallback caso o Chromium não aceite insertText.
-                if (!inserido || (campo.textContent || "") !== mensagem) {
-                    campo.textContent = mensagem;
-                    campo.dispatchEvent(new InputEvent("input", {
-                        bubbles: true,
-                        inputType: "insertText",
-                        data: mensagem
-                    }));
-                }
-
-                // O clique ocorre logo após a inserção, sem outra chamada
-                // Python/Selenium e sem esperar o campo limpar.
-                botao.click();
-
-                return {ok: true, texto: campo.textContent || ""};
-            """, SELETOR_CAMPO, mensagem)
-
-            if not resultado or not resultado.get("ok"):
-                erro = (
-                    resultado.get("erro", "Falha desconhecida.")
-                    if resultado else "O navegador não retornou resultado."
+            # Aguarda brevemente o YouTube habilitar o botão após
+            # receber o evento de entrada.
+            try:
+                WebDriverWait(
+                    driver,
+                    1.5,
+                    poll_frequency=0.05
+                ).until(
+                    lambda navegador: navegador.execute_script("""
+                        const botao = document.querySelector("#send-button");
+                        return !!botao &&
+                               !botao.disabled &&
+                               botao.getAttribute("aria-disabled") !== "true";
+                    """)
                 )
-                print("[ENVIO] " + erro)
+            except TimeoutException:
+                print("[ENVIO] O YouTube não habilitou o botão de envio.")
+                return False
+
+            # Clica no botão já habilitado sem uma chamada Selenium extra.
+            clicou = driver.execute_script("""
+                const botao = document.querySelector("#send-button");
+                if (!botao || botao.disabled ||
+                    botao.getAttribute("aria-disabled") === "true") {
+                    return false;
+                }
+                botao.click();
+                return true;
+            """)
+
+            if not clicou:
+                print("[ENVIO] Não foi possível clicar no botão.")
                 return False
 
             print("[ENVIO] Clique de envio realizado.")
