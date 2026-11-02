@@ -1540,11 +1540,11 @@ def comando_trabalhar(channel_id, nome):
 
 
 def comando_pagar(channel_id, nome, argumento):
-    partes = argumento.split()
+    partes = argumento.rsplit(maxsplit=1)
     if len(partes) < 2:
         enviar_mensagem(f"{nome}, use !pagar @usuario quantidade.")
         return
-    alvo_nome = partes[0].lstrip("@").strip(".,:;!?")
+    alvo_nome = partes[0].strip().lstrip("@").strip(".,:;!?")
     try:
         quantidade = int(partes[1])
         if quantidade <= 0:
@@ -1792,8 +1792,10 @@ def premiar_primeiro_espectador(channel_id, nome):
             resposta.raise_for_status()
             registro = resposta.json()
         except Exception as erro:
-            print("[LIVE] Erro ao consultar primeiro espectador:", erro)
-            return
+            # Se a regra do Firebase não permitir o nó /lives, ainda
+            # premiamos o primeiro desta execução e evitamos repetir a consulta.
+            print("[LIVE] Não consegui consultar o registro do primeiro espectador:", erro)
+            registro = None
         if isinstance(registro, dict) and registro.get("primeiro_espectador"):
             primeiro_espectador_premiado = True
             return
@@ -1804,13 +1806,12 @@ def premiar_primeiro_espectador(channel_id, nome):
             boost = max(int(time.time()), ler_int(dados, "boost_ate")) + DURACAO_BOOST_2X
             if not firebase_atualizar_jogador(channel_id, {"nome": nome, "channelId": channel_id, "boost_ate": boost}):
                 return
+        primeiro_espectador_premiado = True
         try:
             resposta = sessao.patch(url, json={"primeiro_espectador": {"channelId": channel_id, "nome": nome, "premiado_em": int(time.time())}}, timeout=TIMEOUT_FIREBASE)
             resposta.raise_for_status()
         except Exception as erro:
-            print("[LIVE] Erro ao salvar primeiro espectador:", erro)
-            return
-        primeiro_espectador_premiado = True
+            print("[LIVE] Não consegui persistir o primeiro espectador:", erro)
         enviar_mensagem(f"🎉 {nome} foi a primeira pessoa no chat desta live e ganhou Boost 2x grátis por 10 minutos!")
 
 
@@ -2232,8 +2233,9 @@ def processar_eventos_chat():
             elif comando == "!trabalhar":
                 comando_trabalhar(channel_id, nome)
 
-            elif comando.startswith("!pagar "):
-                comando_pagar(channel_id, nome, texto.split(maxsplit=1)[1])
+            elif comando == "!pagar" or comando.startswith("!pagar "):
+                argumento = texto.split(maxsplit=1)[1] if " " in texto else ""
+                comando_pagar(channel_id, nome, argumento)
 
             elif comando == "!dado":
                 comando_dado(channel_id, nome)
@@ -2247,11 +2249,13 @@ def processar_eventos_chat():
             elif comando in ("!inventário", "!inventario"):
                 comando_inventario(channel_id, nome)
 
-            elif comando.startswith("!usar "):
-                comando_usar_item(channel_id, nome, texto.split(maxsplit=1)[1])
+            elif comando == "!usar" or comando.startswith("!usar "):
+                argumento = texto.split(maxsplit=1)[1] if " " in texto else ""
+                comando_usar_item(channel_id, nome, argumento)
 
-            elif comando.startswith("!descartar "):
-                comando_descartar_item(channel_id, nome, texto.split(maxsplit=1)[1])
+            elif comando == "!descartar" or comando.startswith("!descartar "):
+                argumento = texto.split(maxsplit=1)[1] if " " in texto else ""
+                comando_descartar_item(channel_id, nome, argumento)
 
             elif comando == "!sorteio":
                 comando_sorteio(channel_id, nome)
