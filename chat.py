@@ -111,6 +111,7 @@ ultimo_moedas = {}
 ultimo_som = {}
 
 lock_jogadores = threading.Lock()
+lock_transacoes = threading.Lock()
 lock_envio = threading.Lock()
 lock_catalogo = threading.Lock()
 lock_cooldown = threading.Lock()
@@ -252,66 +253,64 @@ def processar_jogador(channel_id, nome):
 
     agora = int(time.time())
 
-    # Consulta a memória rapidamente e libera o lock antes
-    # de qualquer operação de rede.
     with lock_jogadores:
         ultimo_pagamento = jogador["ultima_mensagem"]
 
     if agora - ultimo_pagamento < INTERVALO_RECOMPENSA:
         return
 
-    # O Firebase é consultado fora do lock global para que
-    # uma recompensa lenta não bloqueie outros acessos locais.
-    dados = firebase_buscar_jogador(channel_id)
+    # Serializa alterações de saldo, mas não mantém o lock
+    # usado pelo cache enquanto aguarda a rede.
+    with lock_transacoes:
 
-    if dados is None:
-        print(
-            "[MOEDAS] Recompensa cancelada: "
-            "não foi possível consultar o Firebase."
+        dados = firebase_buscar_jogador(channel_id)
+
+        if dados is None:
+            print(
+                "[MOEDAS] Recompensa cancelada: "
+                "não foi possível consultar o Firebase."
+            )
+            return
+
+        try:
+            saldo_atual = int(dados.get("moedas", 0))
+        except (ValueError, TypeError):
+            saldo_atual = 0
+
+        try:
+            ultima_mensagem_atual = int(
+                dados.get("ultima_mensagem", 0)
+            )
+        except (ValueError, TypeError):
+            ultima_mensagem_atual = 0
+
+        if agora - ultima_mensagem_atual < INTERVALO_RECOMPENSA:
+
+            with lock_jogadores:
+                jogador["moedas"] = saldo_atual
+                jogador["ultima_mensagem"] = ultima_mensagem_atual
+
+            return
+
+        novas_moedas = saldo_atual + RECOMPENSA
+
+        sucesso = firebase_atualizar_jogador(
+            channel_id,
+            {
+                "nome": nome,
+                "channelId": channel_id,
+                "moedas": novas_moedas,
+                "ultima_mensagem": agora
+            }
         )
-        return
 
-    try:
-        saldo_atual = int(dados.get("moedas", 0))
-    except (ValueError, TypeError):
-        saldo_atual = 0
-
-    try:
-        ultima_mensagem_atual = int(
-            dados.get("ultima_mensagem", 0)
-        )
-    except (ValueError, TypeError):
-        ultima_mensagem_atual = 0
-
-    # Confere novamente o intervalo usando o valor oficial.
-    if agora - ultima_mensagem_atual < INTERVALO_RECOMPENSA:
+        if not sucesso:
+            return
 
         with lock_jogadores:
-            jogador["moedas"] = saldo_atual
-            jogador["ultima_mensagem"] = ultima_mensagem_atual
-
-        return
-
-    novas_moedas = saldo_atual + RECOMPENSA
-
-    sucesso = firebase_atualizar_jogador(
-        channel_id,
-        {
-            "nome": nome,
-            "channelId": channel_id,
-            "moedas": novas_moedas,
-            "ultima_mensagem": agora
-        }
-    )
-
-    if not sucesso:
-        return
-
-    # Atualiza o cache local somente depois da confirmação.
-    with lock_jogadores:
-        jogador["nome"] = nome
-        jogador["moedas"] = novas_moedas
-        jogador["ultima_mensagem"] = agora
+            jogador["nome"] = nome
+            jogador["moedas"] = novas_moedas
+            jogador["ultima_mensagem"] = agora
 
     print(
         f"[MOEDAS] {nome} recebeu "
@@ -322,10 +321,10 @@ def processar_jogador(channel_id, nome):
 
 def descontar_moedas(channel_id, nome, preco):
 
-    with lock_jogadores:
+    # O mesmo lock usado pela recompensa impede que dois
+    # processos leiam e sobrescrevam o saldo simultaneamente.
+    with lock_transacoes:
 
-        # Sempre consulta o Firebase imediatamente antes
-        # de calcular e aplicar o desconto.
         dados = firebase_buscar_jogador(channel_id)
 
         if dados is None:
@@ -360,10 +359,10 @@ def descontar_moedas(channel_id, nome, preco):
         if not sucesso:
             return None, saldo
 
-        if channel_id in jogadores:
-
-            jogadores[channel_id]["moedas"] = novo_saldo
-            jogadores[channel_id]["nome"] = nome
+        with lock_jogadores:
+            if channel_id in jogadores:
+                jogadores[channel_id]["moedas"] = novo_saldo
+                jogadores[channel_id]["nome"] = nome
 
         return True, novo_saldo
 
