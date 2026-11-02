@@ -102,6 +102,7 @@ sessao = requests.Session()
 fila_mensagens = queue.Queue()
 fila_sons = queue.Queue()
 fila_eventos_chat = queue.Queue()
+fila_recompensas = queue.Queue()
 
 jogadores = {}
 
@@ -1268,6 +1269,39 @@ def iniciar_flask():
 
 
 # ============================================================
+# PROCESSAR RECOMPENSAS EM SEGUNDO PLANO
+# ============================================================
+
+def processar_recompensas():
+
+    print("[MOEDAS] Processador de recompensas iniciado.")
+
+    while rodando or not fila_recompensas.empty():
+
+        try:
+            item = fila_recompensas.get(timeout=0.2)
+
+        except queue.Empty:
+            continue
+
+        if item is None:
+            fila_recompensas.task_done()
+            break
+
+        try:
+            processar_jogador(
+                item["channel_id"],
+                item["nome"]
+            )
+
+        except Exception as erro:
+            print("[MOEDAS] Erro ao processar recompensa:", erro)
+
+        finally:
+            fila_recompensas.task_done()
+
+
+# ============================================================
 # PROCESSAR EVENTOS DO CHAT
 # ============================================================
 
@@ -1293,10 +1327,12 @@ def processar_eventos_chat():
             nome = item["nome"]
             mensagem = item["mensagem"]
 
-            processar_jogador(
-                channel_id,
-                nome
-            )
+            # Recompensas são tratadas em paralelo para que
+            # operações no Firebase não atrasem os comandos.
+            fila_recompensas.put({
+                "channel_id": channel_id,
+                "nome": nome
+            })
 
             texto = mensagem.strip()
             comando = texto.lower()
@@ -1772,6 +1808,7 @@ def encerrar():
     rodando = False
 
     fila_eventos_chat.put(None)
+    fila_recompensas.put(None)
 
     print("\n[ENCERRANDO] Finalizando bot...")
 
@@ -1825,6 +1862,13 @@ def main():
         )
 
         thread_processador.start()
+
+        thread_recompensas = threading.Thread(
+            target=processar_recompensas,
+            daemon=True
+        )
+
+        thread_recompensas.start()
 
         thread_terminal = threading.Thread(
             target=receber_mensagens,
