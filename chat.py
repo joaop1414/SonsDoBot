@@ -373,7 +373,8 @@ def descontar_moedas(channel_id, nome, preco):
             {
                 "nome": nome,
                 "channelId": channel_id,
-                "moedas": novo_saldo
+                "moedas": novo_saldo,
+                "sons_tocados": ler_int(dados, "sons_tocados") + 1
             }
         )
 
@@ -497,8 +498,7 @@ def carregar_catalogo(forcar=False):
                         "preço não configurado no Firebase."
                     )
 
-                    continue
-                url = item.get("download_url")
+                    continue                url = item.get("download_url")
 
                 if not url:
                     continue
@@ -997,8 +997,7 @@ def comando_som(channel_id, nome, argumento):
     if not comando_disponivel(
         channel_id,
         ultimo_som,        INTERVALO_SOM
-    ):
-        return
+    ):        return
 
     if not argumento:
 
@@ -1062,12 +1061,6 @@ def comando_som(channel_id, nome, argumento):
         f'[SONS] {nome} pediu {som["nome"]} '
         f'por {preco} moedas. Saldo restante: {saldo}'
     )
-
-    dados_jogador = firebase_buscar_jogador(channel_id)
-    if isinstance(dados_jogador, dict):
-        firebase_atualizar_jogador(channel_id, {
-            "sons_tocados": ler_int(dados_jogador, "sons_tocados") + 1
-        })
 
     enviar_mensagem(
         f"{nome}, som {som['nome']} comprado por "
@@ -1498,7 +1491,6 @@ const nomeElemento = document.getElementById("nome");
 let reproduzindo = false;
 let buscando = false;
 async function buscarProximo() {
-
     if (buscando || reproduzindo) return;
 
     buscando = true;
@@ -1997,8 +1989,7 @@ def pegar_live_id(handle):
             html = resposta.text
             padroes = (
                 r'"videoId"\s*:\s*"([a-zA-Z0-9_-]{11})"',                r'"externalVideoId"\s*:\s*"([a-zA-Z0-9_-]{11})"',
-                r'"video_id"\s*:\s*"([a-zA-Z0-9_-]{11})"',
-                r'watch\?v=([a-zA-Z0-9_-]{11})',
+                r'"video_id"\s*:\s*"([a-zA-Z0-9_-]{11})"',                r'watch\?v=([a-zA-Z0-9_-]{11})',
                 r'/live/([a-zA-Z0-9_-]{11})'
             )
 
