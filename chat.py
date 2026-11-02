@@ -2168,6 +2168,8 @@ def processar_eventos_chat():
             nome = item["nome"]
             mensagem = item["mensagem"]
 
+            premiar_primeiro_espectador(channel_id, nome)
+
             # Recompensas são tratadas em paralelo para que
             # operações no Firebase não atrasem os comandos.
             fila_recompensas.put({
@@ -2211,6 +2213,33 @@ def processar_eventos_chat():
 
             elif comando == "!pescar":
                 comando_pescar(channel_id, nome)
+
+            elif comando in ("!caçar", "!cacar"):
+                comando_caçar(channel_id, nome)
+
+            elif comando == "!trabalhar":
+                comando_trabalhar(channel_id, nome)
+
+            elif comando.startswith("!pagar "):
+                comando_pagar(channel_id, nome, texto.split(maxsplit=1)[1])
+
+            elif comando == "!dado":
+                comando_dado(channel_id, nome)
+
+            elif comando == "!tempo":
+                comando_tempo(channel_id, nome)
+
+            elif comando == "!somgratis":
+                comando_somgratis(channel_id, nome)
+
+            elif comando in ("!inventário", "!inventario"):
+                comando_inventario(channel_id, nome)
+
+            elif comando.startswith("!usar "):
+                comando_usar_item(channel_id, nome, texto.split(maxsplit=1)[1])
+
+            elif comando.startswith("!descartar "):
+                comando_descartar_item(channel_id, nome, texto.split(maxsplit=1)[1])
 
             elif comando == "!sorteio":
                 comando_sorteio(channel_id, nome)
@@ -2593,7 +2622,7 @@ def monitorar_live(modo_automatico=False):
                         print(
                             f"[LIVE] Nova transmissão detectada: {novo_id}"
                         )
-                        LIVE_ID = novo_id
+                        preparar_nova_live(novo_id)
                         break
 
                 try:
@@ -2630,7 +2659,7 @@ def monitorar_live(modo_automatico=False):
                 novo_id = pegar_live_id(CANAL)
 
                 if novo_id and novo_id != id_conectado:
-                    LIVE_ID = novo_id
+                    preparar_nova_live(novo_id)
                     print(f"[LIVE] Mudando para a nova transmissão: {LIVE_ID}")
 
                     try:
@@ -2706,6 +2735,7 @@ def main():
     try:
 
         modo_automatico = selecionar_live_inicial()
+        preparar_nova_live(LIVE_ID)
         print("[CONFIG] Live selecionada:", LIVE_ID)
 
         iniciar_flask()
