@@ -63,8 +63,11 @@ RECOMPENSA_DIARIA = 25
 INTERVALO_DIARIO = 86400
 
 INTERVALO_PESCA = 60
-PRECO_BOOST_2X = 500
-DURACAO_BOOST_2X = 3600
+PRECO_BOOST_2X = 100
+DURACAO_BOOST_2X = 600
+
+PRECO_SORTE_PESCA = 200
+DURACAO_SORTE_PESCA = 600
 
 INTERVALO_COMANDO = 5
 INTERVALO_SOM = 5
@@ -1177,16 +1180,22 @@ def comando_perfil(channel_id, nome):
     tesouros = ler_int(dados, "tesouros")
     moedas_pescando = ler_int(dados, "moedas_pescando")
     sons_tocados = ler_int(dados, "sons_tocados")
+    agora = int(time.time())
     boost_ate = ler_int(dados, "boost_ate")
+    sorte_ate = ler_int(dados, "sorte_pesca_ate")
     boost_texto = (
-        f" | Boost 2x ativo por {(boost_ate - int(time.time())) // 60} min"
-        if boost_ate > time.time() else ""
+        f" | Boost 2x ativo por {(boost_ate - agora) // 60} min"
+        if boost_ate > agora else ""
+    )
+    sorte_texto = (
+        f" | 🍀 Sorte na pesca por {(sorte_ate - agora) // 60} min"
+        if sorte_ate > agora else ""
     )
 
     enviar_mensagem(
         f"👤 {nome} | 🪙 {saldo} moedas | 🎣 {pescarias} pescarias "
         f"({tesouros} tesouros, +{moedas_pescando} moedas) "
-        f"| 🔊 {sons_tocados} sons tocados{boost_texto}"
+        f"| 🔊 {sons_tocados} sons tocados{boost_texto}{sorte_texto}"
     )
 
 
@@ -1198,17 +1207,21 @@ def comando_loja(channel_id, nome, argumento=""):
     if not partes:
         enviar_mensagem(
             f"🛒 Loja: boost2x = {PRECO_BOOST_2X} moedas "
-            f"(dobra suas recompensas por 1 hora). "
-            f"Compre com !loja comprar boost2x."
+            f"(dobra suas recompensas por 10 minutos); "
+            f"sortepesca = {PRECO_SORTE_PESCA} moedas "
+            f"(aumenta suas chances de peixes raros e baús por 10 minutos). "
+            f"Compre com !loja comprar boost2x ou !loja comprar sortepesca."
         )
         return
 
     if len(partes) != 2 or partes[0].casefold() != "comprar":
-        enviar_mensagem(f"{nome}, use !loja ou !loja comprar boost2x.")
+        enviar_mensagem(
+            f"{nome}, use !loja ou !loja comprar boost2x/sortepesca."
+        )
         return
 
     item = partes[1].casefold()
-    if item not in ("boost2x", "dobro"):
+    if item not in ("boost2x", "dobro", "sortepesca", "sorte"):
         enviar_mensagem(f"{nome}, esse item não existe. Consulte !loja.")
         return
 
@@ -1219,24 +1232,36 @@ def comando_loja(channel_id, nome, argumento=""):
             return
 
         saldo = ler_int(dados, "moedas")
-        boost_ate = ler_int(dados, "boost_ate")
-        if saldo < PRECO_BOOST_2X:
+        agora = int(time.time())
+
+        if item in ("boost2x", "dobro"):
+            preco = PRECO_BOOST_2X
+            campo_tempo = "boost_ate"
+            duracao = DURACAO_BOOST_2X
+            inicio = max(agora, ler_int(dados, campo_tempo))
+            novo_tempo = inicio + duracao
+            descricao = "Boost 2x"
+        else:
+            preco = PRECO_SORTE_PESCA
+            campo_tempo = "sorte_pesca_ate"
+            duracao = DURACAO_SORTE_PESCA
+            inicio = max(agora, ler_int(dados, campo_tempo))
+            novo_tempo = inicio + duracao
+            descricao = "Sorte na pesca"
+
+        if saldo < preco:
             enviar_mensagem(
-                f"{nome}, o boost custa {PRECO_BOOST_2X} moedas. "
-                f"Você tem {saldo}."
+                f"{nome}, {descricao} custa {preco} moedas. Você tem {saldo}."
             )
             return
 
-        agora = int(time.time())
-        inicio = max(agora, boost_ate)
-        novo_boost = inicio + DURACAO_BOOST_2X
-        novo_saldo = saldo - PRECO_BOOST_2X
+        novo_saldo = saldo - preco
 
         if not firebase_atualizar_jogador(channel_id, {
             "nome": nome,
             "channelId": channel_id,
             "moedas": novo_saldo,
-            "boost_ate": novo_boost
+            campo_tempo: novo_tempo
         }):
             enviar_mensagem(f"{nome}, não consegui concluir a compra.")
             return
@@ -1246,8 +1271,8 @@ def comando_loja(channel_id, nome, argumento=""):
                 jogadores[channel_id]["moedas"] = novo_saldo
 
     enviar_mensagem(
-        f"⚡ {nome} comprou o Boost 2x por {PRECO_BOOST_2X} moedas! "
-        f"Duração: 1 hora. Saldo: {novo_saldo}."
+        f"🛒 {nome} comprou {descricao} por {preco} moedas! "
+        f"Duração: 10 minutos. Saldo: {novo_saldo}."
     )
 
 
@@ -1256,20 +1281,6 @@ def comando_pescar(channel_id, nome):
         enviar_mensagem(f"{nome}, espere 60 segundos para pescar novamente.")
         return
 
-    resultados = [
-        ("comum", 44.9),
-        ("raro", 25.0),
-        ("bau", 10.0),
-        ("lixo", 15.0),
-        ("tubarao", 5.0),
-        ("lendario", 0.1)
-    ]
-    resultado = random.choices(
-        [item[0] for item in resultados],
-        weights=[item[1] for item in resultados],
-        k=1
-    )[0]
-
     with lock_transacoes:
         dados = firebase_buscar_jogador(channel_id)
         if dados is None:
@@ -1277,8 +1288,36 @@ def comando_pescar(channel_id, nome):
             return
 
         saldo = ler_int(dados, "moedas")
+        agora = int(time.time())
         boost_ate = ler_int(dados, "boost_ate")
-        multiplicador = 2 if boost_ate > int(time.time()) else 1
+        sorte_ate = ler_int(dados, "sorte_pesca_ate")
+        multiplicador = 2 if boost_ate > agora else 1
+
+        if sorte_ate > agora:
+            resultados = [
+                ("comum", 34.7),
+                ("raro", 35.0),
+                ("bau", 15.0),
+                ("lixo", 10.0),
+                ("tubarao", 5.0),
+                ("lendario", 0.3)
+            ]
+        else:
+            resultados = [
+                ("comum", 44.9),
+                ("raro", 25.0),
+                ("bau", 10.0),
+                ("lixo", 15.0),
+                ("tubarao", 5.0),
+                ("lendario", 0.1)
+            ]
+
+        resultado = random.choices(
+            [item[0] for item in resultados],
+            weights=[item[1] for item in resultados],
+            k=1
+        )[0]
+
         ganho = 0
         perda = 0
 
