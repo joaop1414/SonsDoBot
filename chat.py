@@ -28,6 +28,7 @@ from selenium.common.exceptions import TimeoutException
 # ============================================================
 
 CANAL = "@jp1414"
+BOT_CHANNEL_ID = "UCsB0k0xMKhsbUiOqydSrUNg"
 LIVE_ID = None
 
 # Quando nenhum ID/link é informado na inicialização, procura
@@ -2320,6 +2321,11 @@ def ler_chat(chat):
                 )
 
                 mensagem = item.message
+
+                # Ignora completamente as mensagens enviadas pelo próprio bot.
+                # Assim, elas não geram recompensas, comandos ou novos eventos.
+                if channel_id == BOT_CHANNEL_ID:
+                    continue
 
                 print(
                     f"[CHAT] {nome} ({channel_id}): {mensagem}"
