@@ -66,6 +66,7 @@ RECOMPENSA_DIARIA = 25
 INTERVALO_DIARIO = 86400
 
 INTERVALO_PESCA = 60
+INTERVALO_PESCA_COM_SORTE = 30
 PRECO_BOOST_2X = 100
 DURACAO_BOOST_2X = 600
 
@@ -1349,10 +1350,6 @@ def comando_loja(channel_id, nome, argumento=""):
 
 
 def comando_pescar(channel_id, nome):
-    if not comando_disponivel(channel_id, ultimo_pesca, INTERVALO_PESCA):
-        enviar_mensagem(f"{nome}, espere 60 segundos para pescar novamente.")
-        return
-
     with lock_transacoes:
         dados = firebase_buscar_jogador(channel_id)
         if dados is None:
@@ -1360,10 +1357,29 @@ def comando_pescar(channel_id, nome):
             return
 
         saldo = ler_int(dados, "moedas")
-        agora = int(time.time())
+        agora = time.time()
         boost_ate = ler_int(dados, "boost_ate")
         sorte_ate = ler_int(dados, "sorte_pesca_ate")
         multiplicador = 2 if boost_ate > agora else 1
+
+        intervalo_pesca = (
+            INTERVALO_PESCA_COM_SORTE
+            if sorte_ate > agora
+            else INTERVALO_PESCA
+        )
+
+        with lock_cooldown:
+            ultimo = ultimo_pesca.get(channel_id, 0)
+            restante = intervalo_pesca - (agora - ultimo)
+
+            if restante > 0:
+                segundos = max(1, int(restante + 0.999))
+                enviar_mensagem(
+                    f"{nome}, espere {segundos} segundos para pescar novamente."
+                )
+                return
+
+            ultimo_pesca[channel_id] = agora
 
         if sorte_ate > agora:
             resultados = [
