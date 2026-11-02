@@ -7,6 +7,7 @@ import requests
 import pytchat
 import shutil
 import itertools
+import random
 
 from flask import Flask, jsonify, Response
 from selenium import webdriver
@@ -57,6 +58,13 @@ USER_AGENT = (
 
 RECOMPENSA = 1
 INTERVALO_RECOMPENSA = 60
+
+RECOMPENSA_DIARIA = 25
+INTERVALO_DIARIO = 86400
+
+INTERVALO_PESCA = 60
+PRECO_BOOST_2X = 500
+DURACAO_BOOST_2X = 3600
 
 INTERVALO_COMANDO = 5
 INTERVALO_SOM = 5
@@ -109,6 +117,16 @@ jogadores = {}
 ultimo_help = {}
 ultimo_moedas = {}
 ultimo_som = {}
+ultimo_diario = {}
+ultimo_perfil = {}
+ultimo_top = {}
+ultimo_pesca = {}
+ultimo_loja = {}
+
+sorteio_ativo = False
+sorteio_premio = 0
+sorteio_participantes = {}
+lock_sorteio = threading.Lock()
 
 lock_jogadores = threading.Lock()
 lock_transacoes = threading.Lock()
@@ -292,7 +310,9 @@ def processar_jogador(channel_id, nome):
 
             return
 
-        novas_moedas = saldo_atual + RECOMPENSA
+        boost_ate = int(dados.get("boost_ate", 0) or 0)
+        multiplicador = 2 if boost_ate > agora else 1
+        novas_moedas = saldo_atual + (RECOMPENSA * multiplicador)
 
         sucesso = firebase_atualizar_jogador(
             channel_id,
@@ -300,7 +320,8 @@ def processar_jogador(channel_id, nome):
                 "nome": nome,
                 "channelId": channel_id,
                 "moedas": novas_moedas,
-                "ultima_mensagem": agora
+                "ultima_mensagem": agora,
+                "boost_ate": boost_ate
             }
         )
 
@@ -427,7 +448,6 @@ def carregar_catalogo(forcar=False):
         ):
 
             return catalogo_cache["sons"]
-
         print("[SONS] Atualizando catálogo...")
 
         try:
@@ -878,7 +898,7 @@ def comando_help(channel_id, nome):
         return
 
     enviar_mensagem(
-        f"{nome}, comandos: !help | !moedas | !sons | !som nome"
+        f"{nome}, comandos: !moedas | !diario | !top | !perfil | !pescar | !sorteio | !loja | !sons | !som nome"
     )
 
 
@@ -898,7 +918,6 @@ def comando_moedas(channel_id, nome):
     dados = firebase_buscar_jogador(channel_id)
 
     if dados is None:
-
         enviar_mensagem(
             f"{nome}, não consegui consultar seu saldo."
         )
@@ -1046,10 +1065,367 @@ def comando_som(channel_id, nome, argumento):
         f'por {preco} moedas. Saldo restante: {saldo}'
     )
 
+    dados_jogador = firebase_buscar_jogador(channel_id)
+    if isinstance(dados_jogador, dict):
+        firebase_atualizar_jogador(channel_id, {
+            "sons_tocados": ler_int(dados_jogador, "sons_tocados") + 1
+        })
+
     enviar_mensagem(
         f"{nome}, som {som['nome']} comprado por "
         f"{preco} moedas! Saldo: {saldo}."
     )
+
+
+# ============================================================
+# ECONOMIA, PERFIL, LOJA, PESCA E SORTEIO
+# ============================================================
+
+def ler_int(dados, chave, padrao=0):
+    try:
+        return int(dados.get(chave, padrao) or padrao)
+    except (ValueError, TypeError):
+        return padrao
+
+
+def comando_diario(channel_id, nome):
+    dados = firebase_buscar_jogador(channel_id)
+    if dados is None:
+        enviar_mensagem(f"{nome}, não consegui consultar sua conta.")
+        return
+
+    agora = int(time.time())
+    ultimo = ler_int(dados, "ultimo_diario")
+    restante = INTERVALO_DIARIO - (agora - ultimo)
+
+    if restante > 0:
+        horas = restante // 3600
+        minutos = (restante % 3600) // 60
+        enviar_mensagem(
+            f"{nome}, você já resgatou seu diário! "
+            f"Volte em {horas}h {minutos}min."
+        )
+        return
+
+    boost_ate = ler_int(dados, "boost_ate")
+    multiplicador = 2 if boost_ate > agora else 1
+    ganho = RECOMPENSA_DIARIA * multiplicador
+    saldo = ler_int(dados, "moedas") + ganho
+
+    sucesso = firebase_atualizar_jogador(channel_id, {
+        "nome": nome,
+        "channelId": channel_id,
+        "moedas": saldo,
+        "ultimo_diario": agora
+    })
+    if not sucesso:
+        enviar_mensagem(f"{nome}, não consegui entregar sua recompensa.")
+        return
+
+    with lock_jogadores:
+        if channel_id in jogadores:
+            jogadores[channel_id]["moedas"] = saldo
+
+    enviar_mensagem(
+        f"🎁 {nome}, você recebeu {ganho} moedas do diário! "
+        f"Saldo: {saldo}."
+    )
+
+
+def comando_top(channel_id, nome):
+    if not comando_disponivel(channel_id, ultimo_top, 15):
+        return
+
+    try:
+        resposta = sessao.get(
+            FIREBASE_URL + "jogadores.json",
+            timeout=TIMEOUT_FIREBASE
+        )
+        resposta.raise_for_status()
+        dados = resposta.json()
+        if not isinstance(dados, dict):
+            dados = {}
+    except Exception as erro:
+        print("[TOP] Erro ao consultar ranking:", erro)
+        enviar_mensagem("Não consegui carregar o ranking agora.")
+        return
+
+    ranking = []
+    for jogador_id, info in dados.items():
+        if not isinstance(info, dict):
+            continue
+        ranking.append((
+            ler_int(info, "moedas"),
+            str(info.get("nome", "Jogador"))
+        ))
+
+    ranking.sort(key=lambda item: item[0], reverse=True)
+    if not ranking:
+        enviar_mensagem("Ainda não há jogadores no ranking.")
+        return
+
+    linhas = [
+        f"{i + 1}º {apelido}: {saldo}"
+        for i, (saldo, apelido) in enumerate(ranking[:5])
+    ]
+    enviar_mensagem("🏆 TOP moedas: " + " | ".join(linhas))
+
+
+def comando_perfil(channel_id, nome):
+    if not comando_disponivel(channel_id, ultimo_perfil, 10):
+        return
+
+    dados = firebase_buscar_jogador(channel_id)
+    if dados is None:
+        enviar_mensagem(f"{nome}, não consegui carregar seu perfil.")
+        return
+
+    saldo = ler_int(dados, "moedas")
+    pescarias = ler_int(dados, "pescarias")
+    tesouros = ler_int(dados, "tesouros")
+    moedas_pescando = ler_int(dados, "moedas_pescando")
+    sons_tocados = ler_int(dados, "sons_tocados")
+    boost_ate = ler_int(dados, "boost_ate")
+    boost_texto = (
+        f" | Boost 2x ativo por {(boost_ate - int(time.time())) // 60} min"
+        if boost_ate > time.time() else ""
+    )
+
+    enviar_mensagem(
+        f"👤 {nome} | 🪙 {saldo} moedas | 🎣 {pescarias} pescarias "
+        f"({tesouros} tesouros, +{moedas_pescando} moedas) "
+        f"| 🔊 {sons_tocados} sons tocados{boost_texto}"
+    )
+
+
+def comando_loja(channel_id, nome, argumento=""):
+    if not comando_disponivel(channel_id, ultimo_loja, 5):
+        return
+
+    partes = argumento.strip().split()
+    if not partes:
+        enviar_mensagem(
+            f"🛒 Loja: boost2x = {PRECO_BOOST_2X} moedas "
+            f"(dobra suas recompensas por 1 hora). "
+            f"Compre com !loja comprar boost2x."
+        )
+        return
+
+    if len(partes) != 2 or partes[0].casefold() != "comprar":
+        enviar_mensagem(f"{nome}, use !loja ou !loja comprar boost2x.")
+        return
+
+    item = partes[1].casefold()
+    if item not in ("boost2x", "dobro"):
+        enviar_mensagem(f"{nome}, esse item não existe. Consulte !loja.")
+        return
+
+    with lock_transacoes:
+        dados = firebase_buscar_jogador(channel_id)
+        if dados is None:
+            enviar_mensagem(f"{nome}, não consegui consultar seu saldo.")
+            return
+
+        saldo = ler_int(dados, "moedas")
+        boost_ate = ler_int(dados, "boost_ate")
+        if saldo < PRECO_BOOST_2X:
+            enviar_mensagem(
+                f"{nome}, o boost custa {PRECO_BOOST_2X} moedas. "
+                f"Você tem {saldo}."
+            )
+            return
+
+        agora = int(time.time())
+        inicio = max(agora, boost_ate)
+        novo_boost = inicio + DURACAO_BOOST_2X
+        novo_saldo = saldo - PRECO_BOOST_2X
+
+        if not firebase_atualizar_jogador(channel_id, {
+            "nome": nome,
+            "channelId": channel_id,
+            "moedas": novo_saldo,
+            "boost_ate": novo_boost
+        }):
+            enviar_mensagem(f"{nome}, não consegui concluir a compra.")
+            return
+
+        with lock_jogadores:
+            if channel_id in jogadores:
+                jogadores[channel_id]["moedas"] = novo_saldo
+
+    enviar_mensagem(
+        f"⚡ {nome} comprou o Boost 2x por {PRECO_BOOST_2X} moedas! "
+        f"Duração: 1 hora. Saldo: {novo_saldo}."
+    )
+
+
+def comando_pescar(channel_id, nome):
+    if not comando_disponivel(channel_id, ultimo_pesca, INTERVALO_PESCA):
+        enviar_mensagem(f"{nome}, espere 60 segundos para pescar novamente.")
+        return
+
+    resultados = [
+        ("comum", 44.9),
+        ("raro", 25.0),
+        ("bau", 10.0),
+        ("lixo", 15.0),
+        ("tubarao", 5.0),
+        ("lendario", 0.1)
+    ]
+    resultado = random.choices(
+        [item[0] for item in resultados],
+        weights=[item[1] for item in resultados],
+        k=1
+    )[0]
+
+    dados = firebase_buscar_jogador(channel_id)
+    if dados is None:
+        enviar_mensagem(f"{nome}, não consegui iniciar sua pescaria.")
+        return
+
+    saldo = ler_int(dados, "moedas")
+    boost_ate = ler_int(dados, "boost_ate")
+    multiplicador = 2 if boost_ate > int(time.time()) else 1
+    ganho = 0
+    perda = 0
+
+    if resultado == "comum":
+        ganho = random.randint(2, 5)
+        mensagem = f"🐟 {nome} pescou um peixe comum e ganhou {ganho} moedas!"
+    elif resultado == "raro":
+        ganho = random.randint(6, 12)
+        mensagem = f"🐠 {nome} pescou um peixe raro e ganhou {ganho} moedas!"
+    elif resultado == "bau":
+        ganho = random.randint(15, 30)
+        mensagem = f"💎 {nome} encontrou um baú e ganhou {ganho} moedas!"
+    elif resultado == "lixo":
+        mensagem = f"👢 {nome} pescou uma bota velha. Que azar!"
+    elif resultado == "tubarao":
+        perda = min(saldo, random.randint(2, 5))
+        mensagem = f"🦈 Um tubarão atacou {nome}! Você perdeu {perda} moedas!"
+    else:
+        ganho = 100
+        mensagem = f"🌟 LENDÁRIO! {nome} pescou um peixe lendário e ganhou 100 moedas!"
+
+    ganho *= multiplicador
+    novo_saldo = saldo + ganho - perda
+    pescarias = ler_int(dados, "pescarias") + 1
+    tesouros = ler_int(dados, "tesouros") + (1 if resultado == "bau" else 0)
+    moedas_pescando = ler_int(dados, "moedas_pescando") + ganho
+
+    atualizacao = {
+        "nome": nome,
+        "channelId": channel_id,
+        "moedas": novo_saldo,
+        "pescarias": pescarias,
+        "tesouros": tesouros,
+        "moedas_pescando": moedas_pescando
+    }
+
+    if not firebase_atualizar_jogador(channel_id, atualizacao):
+        enviar_mensagem(f"{nome}, houve um erro ao registrar sua pescaria.")
+        return
+
+    with lock_jogadores:
+        if channel_id in jogadores:
+            jogadores[channel_id]["moedas"] = novo_saldo
+
+    enviar_mensagem(mensagem + f" Saldo: {novo_saldo}.")
+
+
+def comando_sorteio(channel_id, nome):
+    with lock_sorteio:
+        if not sorteio_ativo:
+            enviar_mensagem(f"{nome}, não há sorteio ativo no momento.")
+            return
+        if channel_id in sorteio_participantes:
+            enviar_mensagem(f"{nome}, você já está participando do sorteio!")
+            return
+        sorteio_participantes[channel_id] = nome
+        quantidade = len(sorteio_participantes)
+
+    enviar_mensagem(
+        f"🎟️ {nome} entrou no sorteio! Participantes: {quantidade}."
+    )
+
+
+def controlar_sorteio_terminal(comando):
+    global sorteio_ativo, sorteio_premio, sorteio_participantes
+
+    partes = comando.strip().split()
+    if len(partes) < 2:
+        print("[SORTEIO] Use :sorteio iniciar <premio> ou :sorteio encerrar")
+        return True
+
+    acao = partes[1].casefold()
+    if acao == "iniciar":
+        if len(partes) < 3:
+            print("[SORTEIO] Informe o prêmio. Exemplo: :sorteio iniciar 100")
+            return True
+        try:
+            premio = int(partes[2])
+            if premio < 0:
+                raise ValueError
+        except ValueError:
+            print("[SORTEIO] O prêmio deve ser um número inteiro não negativo.")
+            return True
+
+        with lock_sorteio:
+            if sorteio_ativo:
+                print("[SORTEIO] Já existe um sorteio ativo.")
+                return True
+            sorteio_ativo = True
+            sorteio_premio = premio
+            sorteio_participantes = {}
+
+        enviar_mensagem(
+            f"🎉 SORTEIO ABERTO! Digite !sorteio para participar. "
+            f"Prêmio: {premio} moedas!"
+        )
+        print("[SORTEIO] Sorteio iniciado.")
+        return True
+
+    if acao == "encerrar":
+        with lock_sorteio:
+            if not sorteio_ativo:
+                print("[SORTEIO] Não há sorteio ativo.")
+                return True
+            participantes = list(sorteio_participantes.items())
+            premio = sorteio_premio
+            sorteio_ativo = False
+            sorteio_participantes = {}
+
+        if not participantes:
+            enviar_mensagem("🎟️ Sorteio encerrado sem participantes.")
+            return True
+
+        vencedor_id, vencedor_nome = random.choice(participantes)
+        if premio > 0:
+            with lock_transacoes:
+                dados = firebase_buscar_jogador(vencedor_id)
+                if dados is not None:
+                    saldo = ler_int(dados, "moedas") + premio
+                    if firebase_atualizar_jogador(vencedor_id, {
+                        "nome": vencedor_nome,
+                        "channelId": vencedor_id,
+                        "moedas": saldo
+                    }):
+                        with lock_jogadores:
+                            if vencedor_id in jogadores:
+                                jogadores[vencedor_id]["moedas"] = saldo
+                    else:
+                        print("[SORTEIO] Não foi possível entregar o prêmio.")
+                else:
+                    print("[SORTEIO] Não foi possível consultar o vencedor.")
+        enviar_mensagem(
+            f"🏆 O vencedor do sorteio é {vencedor_nome}! "
+            f"Prêmio: {premio} moedas!"
+        )
+        print("[SORTEIO] Sorteio encerrado.")
+        return True
+
+    print("[SORTEIO] Use :sorteio iniciar <premio> ou :sorteio encerrar")
+    return True
 
 
 # ============================================================
@@ -1248,7 +1624,6 @@ def iniciar_flask():
         print(
             f"[FLASK] Servidor iniciado na porta {FLASK_PORTA}."
         )
-
         app.run(
             host=FLASK_HOST,
             port=FLASK_PORTA,
@@ -1357,6 +1732,26 @@ def processar_eventos_chat():
                     nome
                 )
 
+            elif comando == "!diario":
+                comando_diario(channel_id, nome)
+
+            elif comando == "!top":
+                comando_top(channel_id, nome)
+
+            elif comando == "!perfil":
+                comando_perfil(channel_id, nome)
+
+            elif comando == "!pescar":
+                comando_pescar(channel_id, nome)
+
+            elif comando == "!sorteio":
+                comando_sorteio(channel_id, nome)
+
+            elif comando == "!loja" or comando.startswith("!loja "):
+                partes = texto.split(maxsplit=1)
+                argumento = partes[1] if len(partes) > 1 else ""
+                comando_loja(channel_id, nome, argumento)
+
             elif comando == "!som" or comando.startswith("!som "):
 
                 partes = texto.split(maxsplit=1)
@@ -1452,6 +1847,10 @@ def receber_mensagens():
         try:
 
             mensagem = input()
+
+            if mensagem.strip().lower().startswith(":sorteio"):
+                controlar_sorteio_terminal(mensagem)
+                continue
 
             if mensagem.strip().lower() == ":sair":
 
@@ -1597,7 +1996,6 @@ def pegar_live_id(handle):
                 encontrados.append(id_url)
 
             html = resposta.text
-
             padroes = (
                 r'"videoId"\s*:\s*"([a-zA-Z0-9_-]{11})"',
                 r'"externalVideoId"\s*:\s*"([a-zA-Z0-9_-]{11})"',
