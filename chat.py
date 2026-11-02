@@ -868,6 +868,12 @@ def enviar_mensagem(mensagem):
     if not mensagem or not mensagem.strip():
         return False
 
+    # O chat do YouTube limita o tamanho da mensagem.
+    # Divide automaticamente textos longos em partes menores.
+    if len(mensagem) > 180:
+        enviar_mensagem_dividida(mensagem, limite=160)
+        return True
+
     if not driver:
         print("[ENVIO] Navegador não iniciado.")
         return False
@@ -1307,11 +1313,17 @@ def comando_perfil(channel_id, nome):
         f" | 🍀 Sorte na pesca por {(sorte_ate - agora) // 60} min"
         if sorte_ate > agora else ""
     )
+    caca_ate = ler_int(dados, "sorte_caca_ate")
+    caca_texto = (
+        f" | 🏹 Boost de caça por {(caca_ate - agora) // 60} min"
+        if caca_ate > agora else ""
+    )
 
     enviar_mensagem(
         f"👤 {nome} | 🪙 {saldo} moedas | 🎣 {pescarias} pescarias "
         f"({tesouros} tesouros, +{moedas_pescando} moedas) "
-        f"| 🔊 {sons_tocados} sons tocados{boost_texto}{sorte_texto}"
+        f"| 🏹 {ler_int(dados, 'cacas')} caçadas "
+        f"| 🔊 {sons_tocados} sons tocados{boost_texto}{sorte_texto}{caca_texto}"
     )
 
 
