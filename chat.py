@@ -760,95 +760,80 @@ def enviar_mensagem(mensagem):
 
         try:
 
-            campo = encontrar_campo_mensagem()
+            # Faz foco, inserção e clique em uma única chamada ao
+            # ChromeDriver, reduzindo a comunicação entre Python e Chromium.
+            resultado = driver.execute_script("""
+                const seletor = arguments[0];
+                const mensagem = arguments[1];
 
-            if not campo:
-                print("[ENVIO] Campo não encontrado.")
+                const campo =
+                    document.querySelector(seletor) ||
+                    document.querySelector("#input[contenteditable]");
+
+                const botao = document.querySelector("#send-button");
+
+                if (!campo) {
+                    return {ok: false, erro: "Campo de mensagem não encontrado."};
+                }
+
+                if (!botao) {
+                    return {ok: false, erro: "Botão de envio não encontrado."};
+                }
+
+                if (botao.disabled || botao.getAttribute("aria-disabled") === "true") {
+                    return {ok: false, erro: "Botão de envio está desativado."};
+                }
+
+                campo.focus();
+
+                // Usa a edição nativa do navegador para gerar os eventos
+                // esperados pelo editor contenteditable do YouTube.
+                const textoAtual = campo.textContent || "";
+
+                if (textoAtual) {
+                    document.execCommand("selectAll", false, null);
+                    document.execCommand("delete", false, null);
+                }
+
+                const inserido = document.execCommand(
+                    "insertText",
+                    false,
+                    mensagem
+                );
+
+                // Fallback caso o Chromium não aceite insertText.
+                if (!inserido || (campo.textContent || "") !== mensagem) {
+                    campo.textContent = mensagem;
+                    campo.dispatchEvent(new InputEvent("input", {
+                        bubbles: true,
+                        inputType: "insertText",
+                        data: mensagem
+                    }));
+                }
+
+                // O clique ocorre logo após a inserção, sem outra chamada
+                // Python/Selenium e sem esperar o campo limpar.
+                botao.click();
+
+                return {ok: true, texto: campo.textContent || ""};
+            """, SELETOR_CAMPO, mensagem)
+
+            if not resultado or not resultado.get("ok"):
+                erro = (
+                    resultado.get("erro", "Falha desconhecida.")
+                    if resultado else "O navegador não retornou resultado."
+                )
+                print("[ENVIO] " + erro)
                 return False
 
-            driver.execute_script(
-                "arguments[0].focus();",
-                campo
-            )
-
-            texto_atual = (
-                campo.get_attribute("textContent") or ""
-            )
-
-            if texto_atual:
-
-                campo.send_keys(
-                    Keys.CONTROL,
-                    "a"
-                )
-
-                campo.send_keys(Keys.BACKSPACE)
-
-            # Insere o texto diretamente pelo protocolo CDP do Chromium.
-            # Isso evita simular uma tecla para cada caractere e mantém
-            # os eventos de entrada que o editor do YouTube precisa receber.
-            try:
-                driver.execute_cdp_cmd(
-                    "Input.insertText",
-                    {"text": mensagem}
-                )
-            except Exception as erro_cdp:
-                print(
-                    "[ENVIO] Inserção rápida falhou; "
-                    "usando digitação tradicional:",
-                    erro_cdp
-                )
-                campo.send_keys(mensagem)
-
-            botao = driver.find_element(
-                By.CSS_SELECTOR,
-                "#send-button"
-            )
-
-            if not botao.is_displayed():
-                print("[ENVIO] Botão não está visível.")
-                diagnosticar_envio()
-                return False
-
-            botao.click()
-
-            try:
-
-                WebDriverWait(
-                    driver,
-                    TIMEOUT_ENVIO,
-                    poll_frequency=0.1
-                ).until(
-                    lambda navegador: not (
-                        navegador.find_element(
-                            By.CSS_SELECTOR,
-                            SELETOR_CAMPO
-                        ).get_attribute("textContent") or ""
-                    ).strip()
-                )
-
-                print("[ENVIO] Mensagem enviada!")
-
-                return True
-
-            except TimeoutException:
-
-                print(
-                    "[ENVIO] O envio não foi confirmado."
-                )
-
-                diagnosticar_envio()
-
-                return False
+            print("[ENVIO] Clique de envio realizado.")
+            return True
 
         except Exception as erro:
 
             print("[ENVIO] Erro:", erro)
-
             diagnosticar_envio()
-
             return False
-
 
 # ============================================================
 # CONTROLE DE COOLDOWN
