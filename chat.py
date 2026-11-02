@@ -1502,6 +1502,306 @@ def comando_pescar(channel_id, nome):
     enviar_mensagem(mensagem + f" Saldo: {novo_saldo}.")
 
 
+
+def comando_trabalhar(channel_id, nome):
+    with lock_transacoes:
+        dados = firebase_buscar_jogador(channel_id)
+        if dados is None:
+            enviar_mensagem(f"{nome}, não consegui consultar sua conta.")
+            return
+        agora = int(time.time())
+        restante = INTERVALO_TRABALHO - (agora - ler_int(dados, "ultimo_trabalho"))
+        if restante > 0:
+            enviar_mensagem(f"{nome}, você precisa descansar mais {restante} segundos.")
+            return
+        ganho = random.randint(20, 50)
+        if ler_int(dados, "boost_ate") > agora:
+            ganho *= 2
+        saldo = ler_int(dados, "moedas") + ganho
+        if not firebase_atualizar_jogador(channel_id, {"nome": nome, "channelId": channel_id, "moedas": saldo, "ultimo_trabalho": agora}):
+            enviar_mensagem(f"{nome}, não consegui registrar seu trabalho.")
+            return
+        with lock_jogadores:
+            if channel_id in jogadores:
+                jogadores[channel_id]["moedas"] = saldo
+    enviar_mensagem(f"🧰 {nome} trabalhou e ganhou {ganho} moedas! Saldo: {saldo}.")
+
+
+def comando_pagar(channel_id, nome, argumento):
+    partes = argumento.split()
+    if len(partes) < 2:
+        enviar_mensagem(f"{nome}, use !pagar @usuario quantidade.")
+        return
+    alvo_nome = partes[0].lstrip("@").strip(".,:;!?")
+    try:
+        quantidade = int(partes[1])
+        if quantidade <= 0:
+            raise ValueError
+    except ValueError:
+        enviar_mensagem(f"{nome}, informe uma quantidade válida.")
+        return
+    if normalizar_texto(alvo_nome) == normalizar_texto(nome):
+        enviar_mensagem(f"{nome}, você não pode pagar a si mesmo.")
+        return
+    with lock_transacoes:
+        try:
+            resposta = sessao.get(FIREBASE_URL + "jogadores.json", timeout=TIMEOUT_FIREBASE)
+            resposta.raise_for_status()
+            todos = resposta.json() or {}
+        except Exception as erro:
+            print("[PAGAR] Erro ao localizar destinatário:", erro)
+            enviar_mensagem(f"{nome}, não consegui localizar esse jogador.")
+            return
+        encontrados = [(cid, d) for cid, d in todos.items() if isinstance(d, dict) and normalizar_texto(d.get("nome", "")) == normalizar_texto(alvo_nome)]
+        if not encontrados:
+            enviar_mensagem(f"{nome}, não encontrei @{alvo_nome}. A pessoa precisa falar no chat primeiro.")
+            return
+        if len(encontrados) > 1:
+            enviar_mensagem(f"{nome}, há mais de uma pessoa com esse nome. Use um nome único.")
+            return
+        destino_id, destino = encontrados[0]
+        origem = firebase_buscar_jogador(channel_id)
+        if origem is None:
+            enviar_mensagem(f"{nome}, não consegui consultar seu saldo.")
+            return
+        saldo_origem = ler_int(origem, "moedas")
+        if saldo_origem < quantidade:
+            enviar_mensagem(f"{nome}, saldo insuficiente. Você tem {saldo_origem} moedas.")
+            return
+        novo_origem = saldo_origem - quantidade
+        novo_destino = ler_int(destino, "moedas") + quantidade
+        if not firebase_atualizar_jogador(channel_id, {"nome": nome, "channelId": channel_id, "moedas": novo_origem}):
+            enviar_mensagem(f"{nome}, não consegui concluir a transferência.")
+            return
+        if not firebase_atualizar_jogador(destino_id, {"moedas": novo_destino}):
+            firebase_atualizar_jogador(channel_id, {"moedas": saldo_origem})
+            enviar_mensagem(f"{nome}, o crédito falhou e o débito foi revertido.")
+            return
+        with lock_jogadores:
+            if channel_id in jogadores:
+                jogadores[channel_id]["moedas"] = novo_origem
+            if destino_id in jogadores:
+                jogadores[destino_id]["moedas"] = novo_destino
+    enviar_mensagem(f"💸 {nome} pagou {quantidade} moedas para {destino.get('nome', alvo_nome)}.")
+
+
+def comando_dado(channel_id, nome):
+    if comando_disponivel(channel_id, ultimo_dado, INTERVALO_COMANDO):
+        enviar_mensagem(f"🎲 {nome} tirou {random.randint(1, 6)} no dado!")
+
+
+def comando_somgratis(channel_id, nome):
+    if not comando_disponivel(channel_id, ultimo_som_gratis, INTERVALO_SOM_GRATIS):
+        enviar_mensagem(f"{nome}, você poderá usar !somgratis novamente em 10 minutos.")
+        return
+    catalogo = carregar_catalogo()
+    if not catalogo:
+        enviar_mensagem(f"{nome}, não há sons disponíveis.")
+        return
+    som = random.choice(list(catalogo.values()))
+    fila_sons.put({"id": next(contador_sons), "nome": som["nome"], "arquivo": som["arquivo"], "url": som["url"], "preco": 0, "jogador": nome})
+    with lock_transacoes:
+        dados = firebase_buscar_jogador(channel_id)
+        if dados is not None:
+            firebase_atualizar_jogador(channel_id, {"nome": nome, "channelId": channel_id, "sons_tocados": ler_int(dados, "sons_tocados") + 1})
+    enviar_mensagem(f"🎵 {nome} ganhou um som grátis aleatório: {som['nome']}!")
+
+
+def comando_caçar(channel_id, nome):
+    with lock_transacoes:
+        dados = firebase_buscar_jogador(channel_id)
+        if dados is None:
+            enviar_mensagem(f"{nome}, não consegui iniciar sua caçada.")
+            return
+        agora = time.time()
+        boost_caca = ler_int(dados, "sorte_caca_ate") > agora
+        multiplicador = 2 if ler_int(dados, "boost_ate") > agora else 1
+        intervalo = INTERVALO_CACA_COM_BOOST if boost_caca else INTERVALO_CACA
+        with lock_cooldown:
+            restante = intervalo - (agora - ultimo_caca.get(channel_id, 0))
+            if restante > 0:
+                enviar_mensagem(f"{nome}, espere {max(1, int(restante + 0.999))} segundos para caçar novamente.")
+                return
+            ultimo_caca[channel_id] = agora
+        pesos = [("moedas", 45), ("item", 35 if boost_caca else 20), ("pote", 5 if boost_caca else 2), ("perigo", 5 if boost_caca else 8), ("nada", 10 if boost_caca else 25)]
+        resultado = random.choices([x[0] for x in pesos], weights=[x[1] for x in pesos], k=1)[0]
+        saldo = ler_int(dados, "moedas")
+        inventario = dados.get("inventario", {})
+        if not isinstance(inventario, dict):
+            inventario = {}
+        inventario = {str(k): ler_int({"v": v}, "v") for k, v in inventario.items() if ler_int({"v": v}, "v") > 0}
+        ganho = perda = 0
+        if resultado == "moedas":
+            ganho = random.randint(5, 15) * multiplicador
+            mensagem = f"🏹 {nome} caçou e encontrou {ganho} moedas!"
+        elif resultado == "item":
+            item = random.choice(["osso_antigo", "pele_rara", "gema"])
+            inventario[item] = inventario.get(item, 0) + 1
+            rotulos = {"osso_antigo": "osso antigo", "pele_rara": "pele rara", "gema": "gema"}
+            mensagem = f"🎒 {nome} encontrou {rotulos[item]}! Veja !inventário."
+        elif resultado == "pote":
+            inventario["pote_moedas"] = inventario.get("pote_moedas", 0) + 1
+            mensagem = f"🏺 {nome} encontrou um pote cheio de moedas! Use !usar pote_moedas para ganhar 500 moedas!"
+        elif resultado == "perigo":
+            perda = min(saldo, random.randint(2, 8))
+            mensagem = f"🐺 {nome} foi atacado e perdeu {perda} moedas!"
+        else:
+            mensagem = f"🌿 {nome} não encontrou nada desta vez."
+        novo_saldo = saldo + ganho - perda
+        atualizacao = {"nome": nome, "channelId": channel_id, "moedas": novo_saldo, "cacas": ler_int(dados, "cacas") + 1, "moedas_cacando": ler_int(dados, "moedas_cacando") + ganho, "inventario": inventario}
+        if not firebase_atualizar_jogador(channel_id, atualizacao):
+            enviar_mensagem(f"{nome}, houve um erro ao registrar sua caçada.")
+            return
+        with lock_jogadores:
+            if channel_id in jogadores:
+                jogadores[channel_id]["moedas"] = novo_saldo
+    enviar_mensagem_dividida(mensagem + f" Saldo: {novo_saldo}.")
+
+
+def comando_inventario(channel_id, nome):
+    if not comando_disponivel(channel_id, ultimo_inventario, INTERVALO_COMANDO):
+        return
+    dados = firebase_buscar_jogador(channel_id)
+    if dados is None:
+        enviar_mensagem(f"{nome}, não consegui consultar seu inventário.")
+        return
+    inv = dados.get("inventario", {})
+    if not isinstance(inv, dict):
+        inv = {}
+    rotulos = {"pote_moedas": "Pote cheio de moedas", "osso_antigo": "Osso antigo", "pele_rara": "Pele rara", "gema": "Gema"}
+    itens = [f"{rotulos.get(k, k)} x{v}" for k, v in inv.items() if ler_int({"v": v}, "v") > 0]
+    if not itens:
+        enviar_mensagem(f"🎒 {nome}, seu inventário está vazio.")
+    else:
+        enviar_mensagem_dividida(f"🎒 Inventário de {nome}: " + " | ".join(itens))
+
+
+def resolver_item(texto):
+    chave = normalizar_texto(texto).replace(" ", "_")
+    aliases = {"pote": "pote_moedas", "pote_cheio_de_moedas": "pote_moedas", "osso": "osso_antigo", "pele": "pele_rara"}
+    return aliases.get(chave, chave)
+
+
+def comando_usar_item(channel_id, nome, argumento):
+    item = resolver_item(argumento)
+    if item != "pote_moedas":
+        enviar_mensagem(f"{nome}, esse item não pode ser usado. Você pode descartá-lo.")
+        return
+    with lock_transacoes:
+        dados = firebase_buscar_jogador(channel_id)
+        if dados is None:
+            enviar_mensagem(f"{nome}, não consegui consultar seu inventário.")
+            return
+        inv = dados.get("inventario", {})
+        if not isinstance(inv, dict):
+            inv = {}
+        qtd = ler_int(inv, item)
+        if qtd <= 0:
+            enviar_mensagem(f"{nome}, você não tem esse item.")
+            return
+        if qtd == 1:
+            inv.pop(item, None)
+        else:
+            inv[item] = qtd - 1
+        saldo = ler_int(dados, "moedas") + 500
+        if not firebase_atualizar_jogador(channel_id, {"nome": nome, "channelId": channel_id, "moedas": saldo, "inventario": inv}):
+            enviar_mensagem(f"{nome}, não consegui usar o item.")
+            return
+        with lock_jogadores:
+            if channel_id in jogadores:
+                jogadores[channel_id]["moedas"] = saldo
+    enviar_mensagem(f"🏺 {nome} abriu o pote e recebeu 500 moedas! Saldo: {saldo}.")
+
+
+def comando_descartar_item(channel_id, nome, argumento):
+    item = resolver_item(argumento)
+    with lock_transacoes:
+        dados = firebase_buscar_jogador(channel_id)
+        if dados is None:
+            enviar_mensagem(f"{nome}, não consegui consultar seu inventário.")
+            return
+        inv = dados.get("inventario", {})
+        if not isinstance(inv, dict):
+            inv = {}
+        qtd = ler_int(inv, item)
+        if qtd <= 0:
+            enviar_mensagem(f"{nome}, você não tem esse item.")
+            return
+        if qtd == 1:
+            inv.pop(item, None)
+        else:
+            inv[item] = qtd - 1
+        if not firebase_atualizar_jogador(channel_id, {"inventario": inv}):
+            enviar_mensagem(f"{nome}, não consegui descartar o item.")
+            return
+    enviar_mensagem(f"🗑️ {nome} descartou 1 unidade de {item.replace('_', ' ')}.")
+
+
+def comando_tempo(channel_id, nome):
+    if not comando_disponivel(channel_id, ultimo_tempo, INTERVALO_COMANDO):
+        return
+    if not LIVE_INICIO_TIMESTAMP:
+        enviar_mensagem(f"{nome}, ainda não consegui identificar o início da live.")
+        return
+    total = max(0, int(time.time() - LIVE_INICIO_TIMESTAMP))
+    horas, resto = divmod(total, 3600)
+    minutos, segundos = divmod(resto, 60)
+    duracao = f"{horas}h {minutos}min" if horas else (f"{minutos}min {segundos}s" if minutos else f"{segundos}s")
+    enviar_mensagem(f"⏱️ {nome}, esta live está no ar há {duracao}.")
+
+
+def preparar_nova_live(video_id):
+    global LIVE_ID, LIVE_INICIO_TIMESTAMP, primeiro_espectador_premiado
+    LIVE_ID = video_id
+    LIVE_INICIO_TIMESTAMP = time.time()
+    primeiro_espectador_premiado = False
+    try:
+        resposta = sessao.get(f"https://www.youtube.com/watch?v={video_id}", headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT_BUSCA_LIVE)
+        resposta.raise_for_status()
+        datas = re.findall(r'"startTimestamp"\s*:\s*"([^"]+)"', resposta.text)
+        if datas:
+            inicio = datetime.fromisoformat(datas[0].replace("Z", "+00:00"))
+            if inicio.tzinfo is None:
+                inicio = inicio.replace(tzinfo=timezone.utc)
+            LIVE_INICIO_TIMESTAMP = inicio.timestamp()
+    except Exception as erro:
+        print("[LIVE] Não consegui obter início exato da transmissão:", erro)
+    print("[LIVE] Início da live registrado.")
+
+
+def premiar_primeiro_espectador(channel_id, nome):
+    global primeiro_espectador_premiado
+    with lock_primeiro_espectador:
+        if primeiro_espectador_premiado or not LIVE_ID:
+            return
+        url = FIREBASE_URL + f"lives/{LIVE_ID}.json"
+        try:
+            resposta = sessao.get(url, timeout=TIMEOUT_FIREBASE)
+            resposta.raise_for_status()
+            registro = resposta.json()
+        except Exception as erro:
+            print("[LIVE] Erro ao consultar primeiro espectador:", erro)
+            return
+        if isinstance(registro, dict) and registro.get("primeiro_espectador"):
+            primeiro_espectador_premiado = True
+            return
+        with lock_transacoes:
+            dados = firebase_buscar_jogador(channel_id)
+            if dados is None:
+                return
+            boost = max(int(time.time()), ler_int(dados, "boost_ate")) + DURACAO_BOOST_2X
+            if not firebase_atualizar_jogador(channel_id, {"nome": nome, "channelId": channel_id, "boost_ate": boost}):
+                return
+        try:
+            resposta = sessao.patch(url, json={"primeiro_espectador": {"channelId": channel_id, "nome": nome, "premiado_em": int(time.time())}}, timeout=TIMEOUT_FIREBASE)
+            resposta.raise_for_status()
+        except Exception as erro:
+            print("[LIVE] Erro ao salvar primeiro espectador:", erro)
+            return
+        primeiro_espectador_premiado = True
+        enviar_mensagem(f"🎉 {nome} foi a primeira pessoa no chat desta live e ganhou Boost 2x grátis por 10 minutos!")
+
+
 def comando_sorteio(channel_id, nome):
     with lock_sorteio:
         if not sorteio_ativo:
