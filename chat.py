@@ -10,9 +10,12 @@ import itertools
 import random
 import re
 import unicodedata
+import json
+import logging
 from datetime import datetime, timezone
 
 from flask import Flask, jsonify, Response
+from flask_sock import Sock
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
@@ -126,6 +129,8 @@ sessao = requests.Session()
 
 fila_mensagens = queue.Queue()
 fila_sons = queue.Queue()
+clientes_websocket = []
+lock_websocket = threading.Lock()
 fila_eventos_chat = queue.Queue()
 fila_recompensas = queue.Queue()
 
@@ -1181,7 +1186,7 @@ def comando_som(channel_id, nome, argumento):
         "jogador": nome
     }
 
-    fila_sons.put(pedido)
+    enviar_som_overlay(pedido)
 
     print(
         f'[SONS] {nome} pediu {som["nome"]} '
@@ -1916,6 +1921,7 @@ def controlar_sorteio_terminal(comando):
 # ============================================================
 
 app = Flask(__name__)
+sock = Sock(app)
 
 
 PAGINA_OBS = """
@@ -1978,68 +1984,77 @@ html, body {
 const audio = document.getElementById("audio");
 const nomeElemento = document.getElementById("nome");
 
+const filaLocal = [];
 let reproduzindo = false;
-let buscando = false;
-async function buscarProximo() {
-    if (buscando || reproduzindo) return;
+let reconexao = 1000;
+let socket = null;
 
-    buscando = true;
+function conectarWebSocket() {
+    const protocolo = location.protocol === "https:" ? "wss://" : "ws://";
+    socket = new WebSocket(protocolo + location.host + "/ws");
+
+    socket.addEventListener("open", () => {
+        console.log("[OBS] WebSocket conectado.");
+        reconexao = 1000;
+    });
+
+    socket.addEventListener("message", (evento) => {
+        try {
+            const dados = JSON.parse(evento.data);
+            if (dados.tipo === "som" && dados.som) {
+                filaLocal.push(dados.som);
+                reproduzirProximo();
+            }
+        } catch (erro) {
+            console.error("[OBS] Mensagem WebSocket inválida:", erro);
+        }
+    });
+
+    socket.addEventListener("close", () => {
+        console.warn("[OBS] WebSocket desconectado. Reconectando...");
+        setTimeout(conectarWebSocket, reconexao);
+        reconexao = Math.min(reconexao * 2, 15000);
+    });
+
+    socket.addEventListener("error", () => {
+        socket.close();
+    });
+}
+
+async function reproduzirProximo() {
+    if (reproduzindo || filaLocal.length === 0) return;
+
+    const som = filaLocal.shift();
+    reproduzindo = true;
+
+    nomeElemento.textContent = som.jogador + " tocou " + som.nome;
+    nomeElemento.style.display = "block";
+    audio.src = som.url;
 
     try {
-
-        const resposta = await fetch("/api/proximo", {            cache: "no-store"
-        });
-
-        if (!resposta.ok) {
-            throw new Error("Erro na API");
-        }
-
-        const dados = await resposta.json();
-
-        if (!dados.som) {
-            buscando = false;
-            setTimeout(buscarProximo, 100);
-            return;
-        }
-
-        reproduzindo = true;
-        buscando = false;
-
-        nomeElemento.textContent = dados.som.jogador + " tocou " + dados.som.nome;
-        nomeElemento.style.display = "block";
-
-        audio.src = dados.som.url;
-
         await audio.play();
-
     } catch (erro) {
-
-        console.error("Erro ao buscar/reproduzir:", erro);
-
-        finalizar();
+        console.error("[OBS] Não foi possível reproduzir o áudio:", erro);
+        finalizarSom();
     }
 }
 
-function finalizar() {
-
-    if (!reproduzindo && !buscando) return;
+function finalizarSom() {
+    if (!reproduzindo) return;
 
     reproduzindo = false;
-    buscando = false;
-
     nomeElemento.style.display = "none";
     nomeElemento.textContent = "";
-
     audio.removeAttribute("src");
     audio.load();
 
-    setTimeout(buscarProximo, 100);
+    reproduzirProximo();
 }
 
-audio.addEventListener("ended", finalizar);
-audio.addEventListener("error", finalizar);
+audio.addEventListener("ended", finalizarSom);
+audio.addEventListener("error", finalizarSom);
 
-buscarProximo();
+conectarWebSocket();
 </script>
 
 </body>
@@ -2064,6 +2079,77 @@ def pagina_obs():
         PAGINA_OBS,
         mimetype="text/html"
     )
+
+
+@sock.route("/ws")
+def websocket_obs(ws):
+
+    with lock_websocket:
+        clientes_websocket.append(ws)
+
+        # Entrega os sons que chegaram enquanto o navegador estava offline.
+        while not fila_sons.empty():
+            try:
+                pedido = fila_sons.get_nowait()
+            except queue.Empty:
+                break
+
+            try:
+                ws.send(json.dumps({
+                    "tipo": "som",
+                    "som": pedido
+                }, ensure_ascii=False))
+            except Exception:
+                try:
+                    clientes_websocket.remove(ws)
+                except ValueError:
+                    pass
+                fila_sons.put(pedido)
+                return
+
+    try:
+        while True:
+            mensagem = ws.receive()
+            if mensagem is None:
+                break
+    except Exception:
+        pass
+    finally:
+        with lock_websocket:
+            try:
+                clientes_websocket.remove(ws)
+            except ValueError:
+                pass
+
+
+def enviar_som_overlay(pedido):
+
+    mensagem = json.dumps({
+        "tipo": "som",
+        "som": pedido
+    }, ensure_ascii=False)
+
+    enviados = 0
+    desconectados = []
+
+    with lock_websocket:
+        for cliente in list(clientes_websocket):
+            try:
+                cliente.send(mensagem)
+                enviados += 1
+            except Exception:
+                desconectados.append(cliente)
+
+        for cliente in desconectados:
+            try:
+                clientes_websocket.remove(cliente)
+            except ValueError:
+                pass
+
+    # Mantém compatibilidade com o endpoint antigo e não perde pedidos
+    # caso ainda não exista nenhum navegador OBS conectado.
+    if enviados == 0:
+        fila_sons.put(pedido)
 
 
 @app.route("/api/proximo")
@@ -2100,6 +2186,9 @@ def api_status():
 def iniciar_flask():
 
     def executar():
+
+        # Desativa os logs de acesso do Werkzeug (GET /obs, WebSocket etc.).
+        logging.getLogger("werkzeug").setLevel(logging.ERROR)
 
         print(
             f"[FLASK] Servidor iniciado na porta {FLASK_PORTA}."
